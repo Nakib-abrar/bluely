@@ -1,26 +1,28 @@
 name: Loopback (Windows)
 
-# Checks that desktop audio (the "Them" channel) can be captured on Windows the way Bluely does
-# it: setDisplayMediaRequestHandler({ audio: 'loopback' }) → getDisplayMedia(). GitHub's Windows
-# runners have no sound card, so a virtual one (VB-CABLE) is installed first; the verifier plays a
-# tone through the default output and measures it in the loopback capture.
-# See docs/VERIFY_LOOPBACK.md.
+# Checks desktop audio capture (the "Them" channel) on real Windows the way Bluely does it:
+# setDisplayMediaRequestHandler({ audio: 'loopback' }) → getDisplayMedia(). GitHub's Windows
+# runners have no sound card, so a virtual one (VB-CABLE) is installed and the Windows Audio
+# service started first.
+#  - verify: scripts/verify-loopback plays a tone and measures it in the loopback capture, for the
+#    pinned Electron version and its neighbours (docs/VERIFY_LOOPBACK.md).
+#  - capture-e2e: Bluely itself; the audio pipeline (worklet, Silero VAD, WAV) on a fake mic, and
+#    speech played on the speakers → loopback → VAD → transcript line → automatic suggestion.
 
 on:
   push:
-    paths:
-      - package.json
-      - scripts/verify-loopback/**
-      - src/main/windows/security.ts
-      - .github/workflows/loopback-windows.yml
   workflow_dispatch:
+
+concurrency:
+  group: loopback-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    name: Electron ${{ matrix.electron }} on ${{ matrix.os }}
+    name: Verifier, Electron ${{ matrix.electron }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -38,12 +40,75 @@ jobs:
       - name: Install a virtual sound card (VB-CABLE)
         uses: LABSN/sound-ci-helpers@v1
 
-      - name: Show audio services and devices
+      - name: Start the Windows Audio service
         shell: pwsh
         run: |
-          Get-Service audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
+          Set-Service -Name AudioEndpointBuilder -StartupType Automatic
+          Set-Service -Name audiosrv -StartupType Automatic
+          Start-Service -Name AudioEndpointBuilder, audiosrv
+          Get-Service -Name audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
           Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
+
+      - name: Download Electron ${{ matrix.electron }}
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            npx --yes electron@${{ matrix.electron }} --version
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds (10 * $i)
+          }
+          exit 1
 
       - name: Verify loopback capture
         shell: pwsh
         run: npx --yes electron@${{ matrix.electron }} scripts/verify-loopback/main.cjs --verbose --timeout=60000
+
+  capture-e2e:
+    name: Bluely capture E2E on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install a virtual sound card (VB-CABLE)
+        uses: LABSN/sound-ci-helpers@v1
+
+      - name: Start the Windows Audio service
+        shell: pwsh
+        run: |
+          Set-Service -Name AudioEndpointBuilder -StartupType Automatic
+          Set-Service -Name audiosrv -StartupType Automatic
+          Start-Service -Name AudioEndpointBuilder, audiosrv
+          Get-Service -Name audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (with the audio test harness page)
+        run: pnpm build
+        env:
+          BLUELY_HARNESS: '1'
+
+      - name: Audio pipeline and live loopback E2E
+        run: pnpm exec playwright test tests/e2e/audio.spec.ts tests/e2e/liveaudio.spec.ts
+        env:
+          BLUELY_E2E_AUDIO: '1'
+
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-e2e-${{ matrix.os }}
+          path: test-results/
+          retention-days: 7

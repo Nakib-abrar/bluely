@@ -1,10 +1,10 @@
 /**
- * Real capture end to end (Linux + PulseAudio): speech played on the PC's speakers is captured
- * through desktop loopback ("Them"), cut by the Silero VAD, transcribed (mock OpenRouter) and
- * triggers an automatic suggestion. Measures the auto-suggest latency stages.
+ * Real capture end to end: speech played on the PC's speakers is captured through desktop
+ * loopback ("Them"), cut by the Silero VAD, transcribed (mock OpenRouter) and triggers an
+ * automatic suggestion. Measures the auto-suggest latency stages. Runs on Linux (private
+ * PulseAudio) and on Windows with BLUELY_E2E_AUDIO=1 (see ./speakers.ts).
  */
 import { expect, test, type Page } from '@playwright/test'
-import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { LatencyTrace } from '@shared/types'
@@ -13,21 +13,27 @@ import type {
   startMockOpenRouter as StartMock,
 } from '../../scripts/mock-openrouter.mjs'
 import { launchApp, type LaunchedApp } from './helpers'
-import { hasPulse, startPrivatePulse, type PrivatePulse } from './pulse'
+import { openSpeakers, speakersUnavailableReason, type Speakers } from './speakers'
 
 test.describe.configure({ mode: 'serial' })
-test.skip(!hasPulse(), 'PulseAudio (pulseaudio, pactl, paplay) is not installed')
+const unavailable = speakersUnavailableReason()
+test.skip(unavailable !== null, unavailable ?? '')
 
 const SPEECH = join(__dirname, '..', 'fixtures', 'speech-en-48k.wav')
-let pulse: PrivatePulse | null = null
+const QUESTION = 'Thanks for joining. What does the enterprise plan cost per seat?'
+let speakers: Speakers | null = null
 let mock: MockOpenRouter
 let ctx: LaunchedApp
 let main: Page
 let overlay: Page
 
 test.beforeAll(async () => {
-  pulse = startPrivatePulse()
-  test.skip(!pulse, 'Could not start a private PulseAudio daemon')
+  speakers = openSpeakers()
+  test.skip(!speakers, 'Could not open the test speakers (PulseAudio daemon)')
+  // The mock hands out scripted lines in order; when the mic hears an echo of the speakers its
+  // segment could take the question line, so pin every transcription to the question (the echo
+  // Me line is then dropped by the de-duplicator).
+  if (speakers!.micHearsSpeakers) process.env['MOCK_STT_TEXT'] = QUESTION
   const mockUrl = pathToFileURL(join(__dirname, '..', '..', 'scripts', 'mock-openrouter.mjs')).href
   const { startMockOpenRouter } = (await import(mockUrl)) as {
     startMockOpenRouter: typeof StartMock
@@ -37,7 +43,7 @@ test.beforeAll(async () => {
   ctx = await launchApp({
     BLUELY_OPENROUTER_BASE_URL: mock.baseUrl,
     BLUELY_TEST_OPENROUTER_KEY: 'sk-or-test-live-0123456789',
-    PULSE_SERVER: pulse!.env['PULSE_SERVER'] as string,
+    ...speakers!.appEnv,
   })
   main = ctx.main
   await main.evaluate(() =>
@@ -53,7 +59,8 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await ctx?.app.close()
   await mock?.close()
-  pulse?.stop()
+  speakers?.close()
+  delete process.env['MOCK_STT_TEXT']
 })
 
 test('capture goes live on the loopback channel', async () => {
@@ -72,10 +79,7 @@ test('capture goes live on the loopback channel', async () => {
 })
 
 test('speech on the speakers becomes a Them line and an automatic suggestion', async () => {
-  const player = spawn('paplay', [`--device=${pulse!.sink}`, SPEECH], {
-    env: pulse!.env,
-    stdio: 'ignore',
-  })
+  const player = speakers!.play(SPEECH)
   await overlay.getByRole('tab', { name: 'Transcript' }).click()
   await expect(
     overlay.getByText(/What does the enterprise plan cost per seat\?/).first(),
