@@ -191,6 +191,10 @@ export const invokeContract = {
       active: z.boolean(),
     }),
   ).returns<void>(),
+  /** Live VAD state of a channel (lets auto-suggest wait while the other person keeps talking). */
+  'audio:speaking': ch(
+    z.object({ sessionId: id, channel: channelSchema, speaking: z.boolean() }),
+  ).returns<void>(),
   /** Overlay finished flushing audio after a stop request. */
   'audio:stopped': ch(z.object({ sessionId: id })).returns<void>(),
   /** Settings › Test microphone: transcribe a short sample with the configured STT model. */

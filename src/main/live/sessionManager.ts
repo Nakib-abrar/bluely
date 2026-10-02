@@ -88,6 +88,8 @@ export class SessionManager implements LiveContextSource {
         const lang = this.ctx.settings.get().language.transcription
         return lang === 'auto' ? undefined : lang
       },
+      // Debounce counts from the end of speech (VAD), not from transcription; see the scheduler.
+      anchorToVadEnd: true,
       run: (trigger, signal) => this.runAuto(trigger, signal),
       onError: (err) => this.ctx.log.warn('Auto-suggest failed', err),
     })
@@ -229,6 +231,7 @@ export class SessionManager implements LiveContextSource {
     const modeId = this.state.modeId
     this.patch({ status: 'stopping' })
     this.scheduler.notifyManualRequest()
+    this.scheduler.setThemSpeaking(false)
     // The overlay flushes trailing speech and calls 'audio:stopped'.
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, AUDIO_STOP_TIMEOUT_MS)
@@ -343,6 +346,11 @@ export class SessionManager implements LiveContextSource {
   setWarning(sessionId: string, code: SessionWarningCode, active: boolean): void {
     if (sessionId !== this.state.sessionId) return
     this.toggleWarning(code, active)
+  }
+
+  setSpeaking(sessionId: string, channel: Channel, speaking: boolean): void {
+    if (sessionId !== this.state.sessionId || channel !== 'them') return
+    this.scheduler.setThemSpeaking(speaking)
   }
 
   audioStopped(sessionId: string): void {

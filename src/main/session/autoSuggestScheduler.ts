@@ -50,6 +50,12 @@ export interface AutoSuggestSchedulerOptions {
   onError?: (err: unknown) => void
   /** A debounced trigger was dropped instead of run (diagnostics). */
   onSkip?: (reason: AutoSkipReason, trigger: AutoTrigger) => void
+  /**
+   * Count the debounce from the moment the speaker stopped (the line's VAD end) instead of from
+   * when transcription returned. VAD already waited for a pause and speech-to-text took time, so
+   * this removes dead time without shortening the real silence the spec asks for.
+   */
+  anchorToVadEnd?: boolean
 }
 
 export interface AutoSuggestState {
@@ -85,6 +91,7 @@ export class AutoSuggestScheduler {
   private timer: unknown = null
   private inFlight: AbortController | null = null
   private lastRunAt: number | null = null
+  private themSpeaking = false
   private disposed = false
 
   constructor(private readonly opts: AutoSuggestSchedulerOptions) {
@@ -133,6 +140,22 @@ export class AutoSuggestScheduler {
     this.cancelPending()
   }
 
+  /**
+   * The other person is talking right now (live VAD signal from the capture). A pending trigger
+   * is held until they stop — their next line will merge into it — then the debounce restarts.
+   */
+  setThemSpeaking(speaking: boolean): void {
+    if (this.disposed || speaking === this.themSpeaking) return
+    this.themSpeaking = speaking
+    if (!this.pending) return
+    if (speaking) {
+      if (this.timer !== null) this.timers.clearTimeout(this.timer)
+      this.timer = null
+    } else {
+      this.armTimer(true)
+    }
+  }
+
   /** A manual action supersedes auto-suggest: drop the pending trigger and abort an in-flight run. */
   notifyManualRequest(): void {
     this.cancelPending()
@@ -165,9 +188,16 @@ export class AutoSuggestScheduler {
     return Math.max(0, this.lastRunAt + this.cooldownMs - this.now())
   }
 
-  private armTimer(): void {
+  private armTimer(fromNow = false): void {
     if (this.timer !== null) this.timers.clearTimeout(this.timer)
-    this.timer = this.timers.setTimeout(() => this.fire(), this.debounceMs)
+    this.timer = null
+    if (this.themSpeaking) return // held until the speaker pauses (setThemSpeaking(false))
+    let delay = this.debounceMs
+    const anchor = this.pending?.trigger.vadEndAt
+    if (this.opts.anchorToVadEnd && !fromNow && anchor != null) {
+      delay = Math.min(this.debounceMs, Math.max(0, anchor + this.debounceMs - this.now()))
+    }
+    this.timer = this.timers.setTimeout(() => this.fire(), delay)
   }
 
   private cancelPending(): void {

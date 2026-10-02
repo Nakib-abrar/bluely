@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { OVERLAY } from '@shared/constants'
 import { Pill } from './components/Pill'
 import { Panel } from './components/Panel'
-import { getCapture, useCaptureLifecycle } from './hooks/useCapture'
+import { getCapture, useCaptureLifecycle, useSpeakingSignal } from './hooks/useCapture'
 import { useLiveSync } from './hooks/useLiveSync'
 import { useOverlayKeys } from './hooks/useOverlayKeys'
 import { useWindowFit } from './hooks/useWindowFit'
@@ -55,6 +55,7 @@ export function App() {
 
   useLiveSync()
   useCaptureLifecycle(capture)
+  useSpeakingSignal(capture)
   useOverlayKeys()
   useWindowFit(rootRef)
 

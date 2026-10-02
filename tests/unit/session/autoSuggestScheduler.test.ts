@@ -316,3 +316,74 @@ describe('AutoSuggestScheduler', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('AutoSuggestScheduler: VAD-anchored debounce and speaking hold', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(100_000)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  function anchored() {
+    const runs: AutoTrigger[] = []
+    const scheduler = new AutoSuggestScheduler({
+      debounceMs: 700,
+      cooldownMs: 0,
+      anchorToVadEnd: true,
+      isEnabled: () => true,
+      run: async (t) => {
+        runs.push(t)
+      },
+    })
+    return { scheduler, runs }
+  }
+
+  it('counts the debounce from the end of speech, not from transcription', () => {
+    const { scheduler, runs } = anchored()
+    // Speech ended 500 ms ago (VAD pause + speech-to-text time); 200 ms of debounce remain.
+    scheduler.onThemLine(them('How much does it cost?'), { vadEndAt: Date.now() - 500 })
+    vi.advanceTimersByTime(199)
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(runs).toHaveLength(1)
+  })
+
+  it('fires right away when the speaker has already been silent for the whole debounce', () => {
+    const { scheduler, runs } = anchored()
+    scheduler.onThemLine(them('Can you send the deck?'), { vadEndAt: Date.now() - 900 })
+    vi.advanceTimersByTime(0)
+    expect(runs).toHaveLength(1)
+  })
+
+  it('holds while they keep talking, merges the continuation, then waits a full debounce', () => {
+    const { scheduler, runs } = anchored()
+    scheduler.onThemLine(them('How would you approach it?'), { vadEndAt: Date.now() - 600 })
+    scheduler.setThemSpeaking(true)
+    vi.advanceTimersByTime(5_000)
+    expect(runs).toHaveLength(0)
+    scheduler.onThemLine(them('given our budget'), { vadEndAt: Date.now() })
+    expect(runs).toHaveLength(0)
+    scheduler.setThemSpeaking(false)
+    vi.advanceTimersByTime(699)
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]?.text).toBe('How would you approach it? given our budget')
+  })
+
+  it('without the option keeps the classic debounce from now', () => {
+    const runs: AutoTrigger[] = []
+    const scheduler = new AutoSuggestScheduler({
+      debounceMs: 700,
+      isEnabled: () => true,
+      run: async (t) => {
+        runs.push(t)
+      },
+    })
+    scheduler.onThemLine(them('What is the timeline?'), { vadEndAt: Date.now() - 900 })
+    vi.advanceTimersByTime(699)
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(runs).toHaveLength(1)
+  })
+})

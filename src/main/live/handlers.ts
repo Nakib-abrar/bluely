@@ -30,6 +30,9 @@ export function registerLiveHandlers(
     session.setWarning(sessionId, code, active),
   )
   handle('audio:stopped', ({ sessionId }) => session.audioStopped(sessionId))
+  handle('audio:speaking', ({ sessionId, channel, speaking }) =>
+    session.setSpeaking(sessionId, channel, speaking),
+  )
 
   handle('ai:run', (req) => {
     session.notifyManualRequest()
