@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an idea or improvement for Bluely.
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/nakib-abrar/bluely#roadmap) and existing issues first.
+        Bluely is a visible assistant: requests to hide it from screen sharing, recording or the people on a call will be closed (see [CONTRIBUTING.md](https://github.com/nakib-abrar/bluely/blob/main/CONTRIBUTING.md#no-stealth-features)).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation (kind of meeting, what you were trying to do) rather than a specific solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Bluely to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This idea needs a new network service or sends new data to OpenRouter (explain above).
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to work on this myself.

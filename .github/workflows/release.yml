@@ -1,0 +1,118 @@
+name: Release
+
+# Builds the Windows NSIS installer + portable .exe with electron-builder.
+# - Push a tag `v<version>` (matching package.json) to publish a GitHub Release with the
+#   Setup exe, portable exe, blockmap, latest.yml (read by the auto-updater) and SHA256SUMS.txt.
+# - Run manually (workflow_dispatch) for a dry run that only uploads workflow artifacts, or with
+#   `publish` checked on a `v*` tag to (re)publish that release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the GitHub Release (only when run on a v* tag). Unchecked = dry run.'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PUBLISH: ${{ github.event_name == 'push' || inputs.publish == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Bluely $VERSION (publish: $PUBLISH, ref: $GITHUB_REF)"
+          # electron-builder publishes to the release tagged v<package.json version>; refuse to
+          # publish from any other ref so a release can never point at the wrong commit.
+          if [ "$PUBLISH" = "true" ] && [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
+            echo "::error::Publishing needs the tag v$VERSION (from package.json), but this run is on $GITHUB_REF."
+            exit 1
+          fi
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Package and publish to GitHub Releases
+        if: env.PUBLISH == 'true'
+        run: pnpm exec electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package (dry run, no upload)
+        if: env.PUBLISH != 'true'
+        run: pnpm exec electron-builder --win --x64 --publish never
+
+      - name: SHA-256 checksums
+        shell: bash
+        working-directory: release
+        run: |
+          # Normalise "hash *file" (binary-mode marker on Windows) to the usual "hash  file".
+          sha256sum "Bluely-Setup-$VERSION.exe" "Bluely-$VERSION-portable.exe" \
+            | sed 's/ \*/  /' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          {
+            echo "### Bluely $VERSION: SHA-256 checksums"
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            echo 'Verify on Windows: `Get-FileHash .\Bluely-Setup-'"$VERSION"'.exe -Algorithm SHA256`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach SHA256SUMS.txt to the release
+        if: env.PUBLISH == 'true'
+        shell: bash
+        run: gh release upload "v$VERSION" release/SHA256SUMS.txt --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluely-${{ env.VERSION }}-windows-x64
+          path: |
+            release/Bluely-Setup-*.exe
+            release/Bluely-Setup-*.exe.blockmap
+            release/Bluely-*-portable.exe
+            release/latest.yml
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

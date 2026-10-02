@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in Bluely does not work as expected.
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check [Troubleshooting](https://github.com/nakib-abrar/bluely/blob/main/docs/TROUBLESHOOTING.md) and existing issues first.
+        **Security problems:** do not file them here; see [SECURITY.md](https://github.com/nakib-abrar/bluely/blob/main/SECURITY.md).
+        **Never paste your OpenRouter API key**, and remove anything private from transcripts or logs.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Started a session in the "Sales call" Mode
+        2. The other person asked a question on Zoom
+        3. Expected an auto-suggestion, but …
+    validations:
+      required: true
+
+  - type: input
+    id: bluely-version
+    attributes:
+      label: Bluely version
+      description: Settings › General shows it (for example 0.1.0).
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build
+      options:
+        - Installer (Bluely-Setup-….exe)
+        - Portable (Bluely-…-portable.exe)
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: Press Win+R, run `winver`, and copy the version and build (for example "Windows 11 23H2, build 22631.4317").
+    validations:
+      required: true
+
+  - type: textarea
+    id: audio-setup
+    attributes:
+      label: Audio setup
+      description: Only needed for transcript or audio problems.
+      placeholder: |
+        Meeting app: Teams desktop / Zoom / Google Meet in Chrome / …
+        Microphone: built-in laptop mic / USB headset (model) / Bluetooth headset (model)
+        Output: speakers / wired headphones / Bluetooth headphones
+        Anything special: virtual audio devices, exclusive mode, audio enhancements, …
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The log is at `%APPDATA%\Bluely\logs\bluely.log` (paste the address into File Explorer).
+        API keys are redacted automatically, but logs can contain model names and errors; check before pasting.
+        Turning on the developer logging setting (advanced settings) adds more detail.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots (mind what is visible), OpenRouter error messages, how often it happens.
