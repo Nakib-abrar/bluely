@@ -5,6 +5,8 @@ import { wireStt } from './stt/wire'
 import { wireModes } from './modes/wire'
 import { wireHistory } from './history/wire'
 import { wireShortcuts } from './shortcuts'
+import { wireUpdater } from './updater'
+import { isPortableBuild } from './platform'
 import { AiService } from './live/aiService'
 import { PostCallRunner } from './live/postCallRunner'
 import { SessionManager } from './live/sessionManager'
@@ -28,6 +30,7 @@ export function wireFeatures(ctx: CoreContext): Features {
   const stt = wireStt(ctx, { http: models.http })
   const modes = wireModes(ctx)
   const history = wireHistory(ctx)
+  const updater = wireUpdater(ctx, { isPortable: isPortableBuild() })
   const notices = new NoticeCenter(ctx, history)
   const ai = new AiService(ctx, models, modes, history)
   const postCall = new PostCallRunner(ctx, models, history)
@@ -71,6 +74,7 @@ export function wireFeatures(ctx: CoreContext): Features {
     toggleSession: () => session.toggle(),
     shutdown: async () => {
       shortcuts.dispose()
+      updater.dispose()
       await session.shutdown()
       history.retention.dispose()
       await models.dispose()
