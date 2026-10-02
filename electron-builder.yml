@@ -1,0 +1,78 @@
+# electron-builder configuration for Bluely (Windows x64: NSIS installer + portable .exe).
+# Docs: https://www.electron.build/configuration
+# Build locally with `pnpm dist` (installer + portable) or `pnpm dist:dir` (unpacked folder only).
+# Releases are built by .github/workflows/release.yml on `v*` tags.
+
+appId: io.github.nakib-abrar.bluely
+productName: Bluely
+copyright: Copyright © 2026 Bluely contributors
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the electron-vite output and package.json go into app.asar. Production dependencies
+# (package.json "dependencies") are added automatically; the "!" patterns below also apply to them.
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+  # better-sqlite3 13 ships N-API prebuilds for every platform in prebuilds/<platform>-<arch>.node
+  # and loads the one matching process.platform/arch at runtime. Only Windows binaries are needed.
+  # The pattern names linux, linuxmusl and darwin explicitly so win32-*.node can never match it.
+  - '!node_modules/better-sqlite3/prebuilds/{linux,linuxmusl,darwin}-*.node'
+  # SQLite C sources and build files (~10 MB) are only used to compile from source; never at runtime.
+  - '!node_modules/better-sqlite3/{deps,src}/**'
+  # pdfjs-dist's optional @napi-rs/canvas pulls one platform package per OS. On the Windows CI
+  # runner only the win32 package is installed; this keeps cross-builds from Linux/macOS from
+  # shipping 30+ MB of non-Windows binaries.
+  - '!node_modules/@napi-rs/canvas-{linux,darwin,android,freebsd}-*{,/**}'
+
+# Tray icons etc. are read from process.resourcesPath/resources (see src/main/resources.ts).
+extraResources:
+  - from: resources
+    to: resources
+
+asar: true
+# Native addons cannot be loaded from inside an asar archive. Electron transparently redirects
+# require() of an unpacked file to app.asar.unpacked.
+asarUnpack:
+  - node_modules/better-sqlite3/**/*.node
+
+# better-sqlite3 13 uses N-API prebuilds (ABI-stable across Node/Electron versions), so nothing
+# has to be rebuilt against Electron's headers. Rebuilding would need a Windows C++ toolchain.
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  icon: build/icon.ico
+  # Fallback name for any other target; nsis and portable set their own names below.
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Bluely
+  # Uninstalling keeps %APPDATA%\Bluely (history, settings, encrypted key). See PRIVACY.md.
+  deleteAppDataOnUninstall: false
+  # Referenced by latest.yml; electron-updater downloads exactly this file name.
+  artifactName: Bluely-Setup-${version}.${ext}
+
+portable:
+  # Portable builds do not auto-update (electron-updater only supports the NSIS target).
+  artifactName: Bluely-${version}-portable.${ext}
+
+# electron-updater reads the generated resources/app-update.yml (NSIS build) and checks
+# https://github.com/nakib-abrar/bluely/releases for latest.yml.
+publish:
+  provider: github
+  owner: nakib-abrar
+  repo: bluely
+  releaseType: release

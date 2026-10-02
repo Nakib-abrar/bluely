@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/nakib-abrar/bluely/security/advisories/new
+    about: Please report security issues privately (see SECURITY.md), not as public issues.
+  - name: Troubleshooting guide
+    url: https://github.com/nakib-abrar/bluely/blob/main/docs/TROUBLESHOOTING.md
+    about: No system audio, microphone problems, SmartScreen, OpenRouter 401/402/429 errors and more.
+  - name: OpenRouter account, billing or model questions
+    url: https://openrouter.ai/docs
+    about: Bluely cannot help with OpenRouter accounts or billing; see OpenRouter's documentation and support.
