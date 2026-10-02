@@ -12,6 +12,12 @@ export type Db = Database.Database
 export function openDatabase(file: string): Db {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true })
   const db = new Database(file)
+  // auto_vacuum must be chosen before the first page is written; switching to WAL writes
+  // page 1, so set it first on a brand-new file (retention/delete-all rely on it).
+  const isNew =
+    (db.pragma('user_version', { simple: true }) as number) === 0 &&
+    (db.prepare('SELECT count(*) AS c FROM sqlite_master').get() as { c: number }).c === 0
+  if (isNew) db.pragma('auto_vacuum = INCREMENTAL')
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')

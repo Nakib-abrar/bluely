@@ -129,3 +129,19 @@ describe('FTS tokenizer (migration 2)', () => {
     expect(count('resume')).toBe(1)
   })
 })
+
+describe('database file', () => {
+  it('creates new files with incremental auto-vacuum so deletes can shrink them', async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const file = join(mkdtempSync(join(tmpdir(), 'bluely-db-')), 'bluely.db')
+    const db = openDatabase(file)
+    expect(db.pragma('journal_mode', { simple: true })).toBe('wal')
+    expect(db.pragma('auto_vacuum', { simple: true })).toBe(2)
+    db.close()
+    const reopened = openDatabase(file)
+    expect(reopened.pragma('auto_vacuum', { simple: true })).toBe(2)
+    reopened.close()
+  })
+})
