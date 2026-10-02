@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+release/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+test-results/
+playwright-report/
+.vite/
+.eslintcache
+# Copied from node_modules by scripts/copy-vad-assets.mjs
+src/renderer/public/vad/
+.tsbuild/

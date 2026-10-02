@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "vite/client"],
+    "jsx": "react-jsx",
+    "outDir": "./.tsbuild/test"
+  },
+  "include": ["tests/**/*", "src/**/*", "scripts/**/*.ts"]
+}

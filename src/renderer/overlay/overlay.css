@@ -1,0 +1,5 @@
+/* The overlay window is transparent; only the pill and panel paint. */
+html,
+body.overlay-body {
+  background: transparent !important;
+}

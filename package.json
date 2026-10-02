@@ -1,0 +1,99 @@
+{
+  "name": "bluely",
+  "productName": "Bluely",
+  "version": "0.1.0",
+  "description": "Bluely: open-source AI meeting copilot for Windows. Live transcript, what-to-say-next suggestions, notes and follow-ups. An open-source Cluely alternative powered by OpenRouter.",
+  "main": "./out/main/index.js",
+  "author": "Bluely contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/nakib-abrar/bluely",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nakib-abrar/bluely.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nakib-abrar/bluely/issues"
+  },
+  "keywords": [
+    "cluely-alternative",
+    "ai-meeting-assistant",
+    "meeting-copilot",
+    "meeting-notes",
+    "ai-notetaker",
+    "live-transcription",
+    "openrouter",
+    "electron",
+    "windows"
+  ],
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.test.json",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node scripts/run-vitest.mjs run",
+    "test:watch": "node scripts/run-vitest.mjs",
+    "test:e2e": "pnpm build && playwright test",
+    "mock:openrouter": "node scripts/mock-openrouter.mjs",
+    "verify:loopback": "electron scripts/verify-loopback/main.cjs",
+    "dist": "pnpm build && electron-builder --win --publish never",
+    "dist:dir": "pnpm build && electron-builder --win --dir --publish never",
+    "postinstall": "node scripts/copy-vad-assets.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "electron-updater": "6.8.9",
+    "fflate": "0.8.3",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.3.289",
+    "undici": "8.11.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@fontsource-variable/inter": "5.3.0",
+    "@playwright/test": "1.63.0",
+    "@ricky0123/vad-web": "0.0.31",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "22.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "clsx": "2.1.1",
+    "electron": "43.7.7",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
+    "lucide-react": "1.50.0",
+    "onnxruntime-web": "1.30.0",
+    "prettier": "3.9.9",
+    "radix-ui": "1.6.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0",
+    "vite": "7.3.6",
+    "vitest": "4.1.11",
+    "zustand": "5.0.15"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}
