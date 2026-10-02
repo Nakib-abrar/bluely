@@ -104,3 +104,28 @@ describe('database foundation', () => {
     expect(hit()).toHaveLength(0)
   })
 })
+
+describe('FTS tokenizer (migration 2)', () => {
+  it('keeps Bangla words whole and still folds Latin diacritics', () => {
+    const db = openDatabase(':memory:')
+    const now = Date.now()
+    db.prepare(
+      "INSERT INTO sessions(id, title, started_at, status, created_at) VALUES ('s1', 'Budget call', ?, 'done', ?)",
+    ).run(now, now)
+    db.prepare(
+      "INSERT INTO transcript_lines(id, session_id, channel, start_ms, end_ms, text, is_final) VALUES ('l1', 's1', 'them', 0, 1, 'আমাদের বাজেট কত? Café résumé', 1)",
+    ).run()
+    const count = (m: string) =>
+      (
+        db.prepare('SELECT count(*) c FROM search_fts WHERE search_fts MATCH ?').get(m) as {
+          c: number
+        }
+      ).c
+    expect(count('"আমাদের"')).toBe(1)
+    expect(count('"আমা"*')).toBe(1)
+    // A vowel-sign fragment must not match on its own any more.
+    expect(count('"দ"')).toBe(0)
+    expect(count('cafe')).toBe(1)
+    expect(count('resume')).toBe(1)
+  })
+})

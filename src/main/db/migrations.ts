@@ -20,6 +20,9 @@ export interface Migration {
 
 const SEARCH_TABLES = ['search_fts', 'search_trigram'] as const
 
+/** Word tokenizer for the knowledge and search indexes (see migration 2). */
+export const FTS_TOKENIZER = `"unicode61 remove_diacritics 2 categories 'L* N* Co M*'"`
+
 function searchTriggers(): string {
   const parts: string[] = []
   for (const t of SEARCH_TABLES) {
@@ -247,6 +250,36 @@ export const MIGRATIONS: Migration[] = [
         );
       `)
       db.exec(searchTriggers())
+    },
+  },
+  {
+    version: 2,
+    name: 'keep combining marks inside FTS tokens (Bangla and other Indic scripts)',
+    up: (db) => {
+      // unicode61's default categories treat combining marks (Mn/Mc) as separators, so Bangla
+      // words such as "আমাদের" were indexed as fragments. Adding M* keeps them whole while
+      // remove_diacritics still folds precomposed Latin letters (café → cafe).
+      db.exec(`
+        DROP TABLE knowledge_chunks_fts;
+        CREATE VIRTUAL TABLE knowledge_chunks_fts USING fts5(
+          text,
+          content = 'knowledge_chunks',
+          content_rowid = 'id',
+          tokenize = ${FTS_TOKENIZER}
+        );
+        INSERT INTO knowledge_chunks_fts(knowledge_chunks_fts) VALUES ('rebuild');
+
+        DROP TABLE search_fts;
+        CREATE VIRTUAL TABLE search_fts USING fts5(
+          text,
+          session_id UNINDEXED,
+          kind UNINDEXED,
+          ref_id UNINDEXED,
+          tokenize = ${FTS_TOKENIZER},
+          prefix = '2 3 4'
+        );
+      `)
+      rebuildSearchIndex(db)
     },
   },
 ]
