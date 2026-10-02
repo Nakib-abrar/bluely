@@ -51,9 +51,9 @@ async function sendSegment(channel: 'me' | 'them', offsetMs: number, durationMs:
 test.beforeAll(async () => {
   // Loaded at runtime: Playwright would otherwise transpile the ESM mock to CommonJS.
   const mockUrl = pathToFileURL(join(__dirname, '..', '..', 'scripts', 'mock-openrouter.mjs')).href
-  const { startMockOpenRouter } = (await import(
-    mockUrl
-  )) as typeof import('../../scripts/mock-openrouter.mjs')
+  const { startMockOpenRouter } = (await import(mockUrl)) as {
+    startMockOpenRouter: typeof StartMock
+  }
   mock = await startMockOpenRouter({ ttftMs: 60, tokenMs: 3, sttMs: 80 })
   ctx = await launchApp({
     BLUELY_OPENROUTER_BASE_URL: mock.baseUrl,
