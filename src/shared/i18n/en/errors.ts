@@ -3,7 +3,8 @@ export const errors = {
   no_key: 'Add your OpenRouter API key in Settings › AI Models to use Bluely.',
   auth: 'OpenRouter rejected the API key. Check it in Settings › AI Models.',
   credits: 'Your OpenRouter account is out of credits. Top up at openrouter.ai to continue.',
-  rate_limit: 'OpenRouter is rate limiting requests. Retrying shortly…',
+  // Shown after Bluely's own automatic retry has also been rate limited.
+  rate_limit: 'OpenRouter is rate limiting requests. Wait a moment, then try again.',
   server: 'The model provider had a problem. Try again in a moment.',
   timeout: 'The request timed out. Check your connection and try again.',
   network: 'Could not reach OpenRouter. Check your internet connection.',

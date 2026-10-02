@@ -17,6 +17,8 @@ export const exportLabels = {
       'The model’s reply could not be read. Try regenerating, or pick another Notes model in Settings › AI Models.',
     emptyResponse:
       'The model returned an empty reply. Try regenerating, or pick another Notes model in Settings › AI Models.',
+    truncatedResponse:
+      'The model’s reply was cut off at its length limit. Try regenerating, or pick another Notes model in Settings › AI Models.',
     longTranscriptFailed: 'Could not summarize this long transcript.',
   },
 } as const

@@ -59,6 +59,12 @@ const KIND_DEFAULT_MAX_TOKENS: Partial<Record<PromptKind, number>> = {
   search_ask: 12_000,
 }
 
+/** One earlier question and answer of a meeting chat. */
+export interface ChatTurn {
+  question: string
+  answer: string
+}
+
 export interface MeetingExcerpt {
   title: string
   /** Epoch ms. */
@@ -93,6 +99,11 @@ export interface ContextInput {
   trigger?: { text: string } | null
   /** meeting_chat: the session's notes (e.g. renderNotesMarkdown output). */
   notesMarkdown?: string | null
+  /**
+   * meeting_chat: earlier questions and answers in this chat, oldest first. Sent as user /
+   * assistant turns before the new question so follow-ups ("when is it due?") keep their referent.
+   */
+  chatHistory?: ChatTurn[]
   /** search_ask: retrieved excerpts, best first. */
   excerpts?: MeetingExcerpt[]
   /** Default 6000 (24000 for meeting_chat, 12000 for search_ask). */
@@ -116,6 +127,7 @@ interface Draft {
   lines: TranscriptLine[]
   snippets: KnowledgeSnippet[]
   excerpts: MeetingExcerpt[]
+  history: ChatTurn[]
 }
 
 function isLiveKind(kind: PromptKind): boolean {
@@ -259,6 +271,7 @@ function userText(draft: Draft, input: ContextInput, task: string, totalLines: n
  * Assembles the chat messages for one AI request: system = base + mode + tone + profile +
  * language rule + action instruction; user = summary, transcript window, knowledge snippets
  * (and notes/excerpts for review kinds), then the task line, plus the screenshot when given.
+ * Meeting chat puts its earlier questions and answers as turns between the two.
  * Keeps the prompt within `maxPromptTokens` by dropping the oldest transcript lines first
  * (never the last 90 s), then trimming snippets to 4, then shortening the summary.
  */
@@ -291,10 +304,11 @@ export function buildContext(input: ContextInput): BuiltContext {
           { type: 'image_url', image_url: { url: screenUrl } },
         ]
       : text
-    return [
-      { role: 'system', content: system },
-      { role: 'user', content },
-    ]
+    const turns = draft.history.flatMap((turn): ChatMessage[] => [
+      { role: 'user', content: turn.question },
+      { role: 'assistant', content: turn.answer },
+    ])
+    return [{ role: 'system', content: system }, ...turns, { role: 'user', content }]
   }
   const measure = (draft: Draft) => estimateMessagesTokens(render(draft))
 
@@ -304,6 +318,10 @@ export function buildContext(input: ContextInput): BuiltContext {
     lines: allLines.filter((l) => l.startMs >= verbatimStart),
     snippets: (input.knowledge ?? []).filter((s) => s.text.trim().length > 0),
     excerpts: input.kind === 'search_ask' ? [...(input.excerpts ?? [])] : [],
+    history:
+      input.kind === 'meeting_chat'
+        ? (input.chatHistory ?? []).filter((h) => clean(h.question) && clean(h.answer))
+        : [],
   }
   let tokens = measure(draft)
   let truncated = false
@@ -371,6 +389,13 @@ export function buildContext(input: ContextInput): BuiltContext {
     }
     const clipped = clipHead(full, lo)
     draft = { ...draft, notes: clipped.length >= MIN_NOTES_CHARS ? clipped : null }
+    tokens = measure(draft)
+    truncated = true
+  }
+
+  // 5. Meeting chat: the oldest earlier questions and answers last.
+  while (tokens > maxTokens && draft.history.length > 0) {
+    draft = { ...draft, history: draft.history.slice(1) }
     tokens = measure(draft)
     truncated = true
   }

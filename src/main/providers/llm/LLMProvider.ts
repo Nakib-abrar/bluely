@@ -23,6 +23,16 @@ export interface ProviderRouting {
   allowFallbacks?: boolean
 }
 
+/**
+ * OpenRouter's unified `reasoning` request object (see providers/llm/reasoning.ts for when
+ * Bluely sends it). Reasoning tokens count against `maxTokens`.
+ */
+export interface ReasoningOptions {
+  effort?: 'minimal' | 'low' | 'medium' | 'high'
+  /** Keep the reasoning text out of the response (the model still reasons). */
+  exclude?: boolean
+}
+
 export interface ChatRequest {
   model: string
   messages: ChatMessage[]
@@ -31,6 +41,7 @@ export interface ChatRequest {
   /** 'json_object' asks for a JSON response where the model supports it. */
   responseFormat?: 'text' | 'json_object'
   routing?: ProviderRouting
+  reasoning?: ReasoningOptions
   signal?: AbortSignal
   /** Short label for logs, e.g. "auto" or "post_notes". */
   tag?: string
@@ -38,8 +49,11 @@ export interface ChatRequest {
 
 export interface ChatUsage {
   promptTokens: number | null
+  /** Billed output tokens, reasoning included. */
   completionTokens: number | null
   costUsd: number | null
+  /** Part of `completionTokens` spent on (hidden) reasoning, when the provider reports it. */
+  reasoningTokens?: number | null
 }
 
 export type ChatStreamEvent =

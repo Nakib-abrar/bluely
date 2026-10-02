@@ -10,11 +10,16 @@ import type {
   ChatStreamEvent,
   LLMProvider,
 } from '@main/providers/llm/LLMProvider'
-import { LATENCY_TEST_PROMPT, LATENCY_TEST_TAG, LatencyTester } from '@main/models/latency'
+import {
+  LATENCY_TEST_MAX_TOKENS,
+  LATENCY_TEST_PROMPT,
+  LATENCY_TEST_TAG,
+  LatencyTester,
+} from '@main/models/latency'
 import { ModelStatsRepo } from '@main/models/statsRepo'
 import { silentLogger } from './helpers'
 
-type Outcome = { ttftMs: number; provider?: string } | ProviderError | 'hang'
+type Outcome = { ttftMs: number | null; provider?: string } | ProviderError | 'hang'
 
 /** Scripted LLM: outcomes per model, consumed in order. Tracks concurrency. */
 class FakeLLM implements LLMProvider {
@@ -40,7 +45,7 @@ class FakeLLM implements LLMProvider {
       }
       const stats: SpeedStats = {
         ttftMs: outcome.ttftMs,
-        totalMs: outcome.ttftMs + 50,
+        totalMs: (outcome.ttftMs ?? 0) + 50,
         tokensPerSec: 80,
         tokensIn: 12,
         tokensOut: 1,
@@ -50,8 +55,9 @@ class FakeLLM implements LLMProvider {
         generationId: 'g',
       }
       yield { type: 'meta', generationId: 'g', model: req.model, provider: stats.provider }
-      yield { type: 'delta', text: 'ok' }
-      yield { type: 'done', finishReason: 'stop', usage: null, stats }
+      if (outcome.ttftMs !== null) yield { type: 'delta', text: 'ok' }
+      const finishReason = outcome.ttftMs === null ? 'length' : 'stop'
+      yield { type: 'done', finishReason, usage: null, stats }
     } finally {
       this.inFlight--
     }
@@ -110,13 +116,35 @@ describe('LatencyTester', () => {
     const first = llm.requests[0]!
     expect(first).toMatchObject({
       messages: [{ role: 'user', content: LATENCY_TEST_PROMPT }],
-      maxTokens: 5,
+      maxTokens: LATENCY_TEST_MAX_TOKENS,
       temperature: 0,
       tag: LATENCY_TEST_TAG,
       // User's provider pins are kept; sort is forced to latency.
       routing: { sort: 'latency', order: ['groq'], allowFallbacks: false },
     })
     expect(llm.requests[3]?.routing).toEqual({ sort: 'latency', allowFallbacks: true })
+    // A plain model gets no reasoning parameter.
+    expect(first.reasoning).toBeUndefined()
+  })
+
+  it('gives reasoning models room to answer: low effort, hidden reasoning, extra tokens', async () => {
+    const { llm, tester } = setup({})
+    tester.start(['openai/gpt-oss-120b'], 1)
+    await tester.whenIdle()
+    const req = llm.requests[0]!
+    // 5 tokens (the old cap) were used up by reasoning before the first word.
+    expect(LATENCY_TEST_MAX_TOKENS).toBeGreaterThanOrEqual(64)
+    expect(req.maxTokens).toBeGreaterThanOrEqual(LATENCY_TEST_MAX_TOKENS + 1024)
+    expect(req.reasoning).toEqual({ effort: 'low', exclude: true })
+  })
+
+  it('reports a run without any answer text as an error, not a blank sample', async () => {
+    const { events, tester } = setup({ 'm/r': [{ ttftMs: null }, { ttftMs: 200 }] })
+    tester.start(['m/r'], 2)
+    await tester.whenIdle()
+    const final = events.at(-1)!
+    expect(final.errors).toEqual([t('models.latencyNoAnswer')])
+    expect(final.result).toMatchObject({ samples: 1, ttftP50: 200 })
   })
 
   it('emits progress after each request and one final event per model with this run’s stat', async () => {

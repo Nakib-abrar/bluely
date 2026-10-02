@@ -22,8 +22,17 @@ export type UserProfile = Settings['profile']
 /** Built-in mode that must coach rather than script answers (see interviewCoaching()). */
 export const INTERVIEW_MODE_ID = 'builtin-interview'
 
-/** Live kinds that would otherwise produce words for the user to say out loud. */
-const SCRIPTING_KINDS: ReadonlySet<PromptKind> = new Set<PromptKind>(['say', 'auto', 'assist'])
+/**
+ * Live kinds that would otherwise produce words for the user to say out loud (or, with the screen
+ * attached, a full solution). A typed Ask counts too: "give me an answer to…" must not bypass the
+ * coaching that the one-click actions get.
+ */
+const SCRIPTING_KINDS: ReadonlySet<PromptKind> = new Set<PromptKind>([
+  'say',
+  'auto',
+  'assist',
+  'ask',
+])
 
 /** Core rules for every live request. */
 export function basePrompt(): string {
@@ -93,14 +102,21 @@ function interviewCoaching(kind: PromptKind): string {
   const lines = [
     '## Task: Interview coaching',
     'This mode is for interview prep & practice, so coach me. Do NOT write a script or a ready-made answer for me to read out verbatim; I answer in my own words.',
+  ]
+  if (kind === 'ask') {
+    lines.push(
+      'Answer my typed question (at the end) as my coach, briefly. If it asks for an answer to an interview question, even explicitly ("give me an answer to…", "what should I say"), do not write one: give the hints below instead. Factual questions about the role or company can be answered directly from the context.',
+    )
+  }
+  lines.push(
     'Give, in under 60 words:',
     '- **They want to know:** the real question in one line',
     '- **Cover:** 2–3 short hints on what to mention',
     '- **Structure:** e.g. STAR (Situation, Task, Action, Result)',
     '- **Your experience:** a reminder of something relevant from my own background (About me or what I said earlier), if any',
-  ]
+  )
   if (kind === 'auto') lines.push('Their question is quoted at the end.')
-  if (kind === 'assist')
+  if (kind === 'assist' || kind === 'ask')
     lines.push(
       'If my screen is attached (e.g. a practice task), give hints and an approach, not the full solution.',
     )

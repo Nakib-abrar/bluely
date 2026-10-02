@@ -81,6 +81,8 @@ export class FakeLLM implements LLMProvider {
   readonly calls: ChatRequest[] = []
   /** Requests whose promise has settled (resolved or rejected). */
   settled = 0
+  /** finish_reason reported for a request ('length' = cut off at max_tokens). */
+  finishReason: (req: ChatRequest) => string = () => 'stop'
 
   constructor(public handler: Handler = () => 'ok') {}
 
@@ -104,7 +106,7 @@ export class FakeLLM implements LLMProvider {
         text,
         stats: speedStats(req.model),
         usage: { promptTokens: 50, completionTokens: 10, costUsd: 0.0001 },
-        finishReason: 'stop',
+        finishReason: this.finishReason(req),
       }
     } finally {
       this.settled++

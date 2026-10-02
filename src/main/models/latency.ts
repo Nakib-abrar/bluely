@@ -5,6 +5,7 @@ import type { EventBus } from '../ipc/events'
 import type { Logger } from '../log'
 import { ProviderError } from '../providers/errors'
 import type { LLMProvider, ProviderRouting } from '../providers/llm/LLMProvider'
+import { answerBudget } from '../providers/llm/reasoning'
 import { modelMessage } from './messages'
 import { summarizeSamples, type LatencySample, type ModelStatsRepo } from './statsRepo'
 
@@ -12,6 +13,12 @@ import { summarizeSamples, type LatencySample, type ModelStatsRepo } from './sta
 export const LATENCY_TEST_TAG = 'latency_test'
 export const LATENCY_TEST_PROMPT = 'Reply with the single word: ok'
 export const DEFAULT_LATENCY_RUNS = 5
+/**
+ * Answer cap for a test request. "ok" needs one or two tokens; the cap only bounds a model that
+ * rambles. It used to be 5, which a reasoning model spends thinking, leaving no first word to
+ * time. Models that think by default get reasoning headroom on top (see answerBudget).
+ */
+export const LATENCY_TEST_MAX_TOKENS = 64
 const MAX_RUNS = 10
 
 export interface LatencyTesterOptions {
@@ -97,6 +104,7 @@ export class LatencyTester {
       const providers: string[] = []
       let completed = 0
       const routing: ProviderRouting = { ...this.opts.getRouting(model), sort: 'latency' }
+      const budget = answerBudget(model, LATENCY_TEST_MAX_TOKENS)
       for (let i = 0; i < runs && !signal.aborted; i++) {
         // undici returns a finished socket to the pool on a later event-loop turn. Without this
         // yield, back-to-back requests alternate between two sockets and the second one pays a
@@ -107,7 +115,8 @@ export class LatencyTester {
           for await (const ev of llm.streamChat({
             model,
             messages: [{ role: 'user', content: LATENCY_TEST_PROMPT }],
-            maxTokens: 5,
+            maxTokens: budget.maxTokens,
+            ...(budget.reasoning ? { reasoning: budget.reasoning } : {}),
             temperature: 0,
             routing,
             signal,
@@ -115,7 +124,11 @@ export class LatencyTester {
           })) {
             if (ev.type === 'done') stat = ev.stats
           }
-          if (stat) {
+          if (stat && stat.ttftMs === null) {
+            // No answer text at all (e.g. the whole budget went to reasoning): there is no
+            // first word to time, so this run counts as failed instead of a blank sample.
+            errors.push(modelMessage('latencyNoAnswer'))
+          } else if (stat) {
             samples.push({
               ttftMs: stat.ttftMs,
               totalMs: stat.totalMs,

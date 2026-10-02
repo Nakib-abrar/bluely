@@ -75,6 +75,16 @@ describe('RunningSummarizer', () => {
     expect(updates[0]?.stats.model).toBe('fast/model')
   })
 
+  it('gives a reasoning Fast model room to think before writing the summary', async () => {
+    const { llm, summarizer, getModel } = setup()
+    getModel.mockReturnValue({ model: 'openai/gpt-oss-120b', routing: { sort: 'latency' } })
+    summarizer.maybeUpdate(linesUntil(450), 450_000)
+    await summarizer.whenIdle()
+    expect(llm.calls[0]?.reasoning).toEqual({ effort: 'low', exclude: true })
+    expect(llm.calls[0]?.maxTokens).toBeGreaterThanOrEqual(800 + 1024)
+    expect(summarizer.current()).toBe('Summary #1')
+  })
+
   it('waits for the interval and only runs when new lines aged out', async () => {
     const { clock, llm, summarizer } = setup()
     summarizer.maybeUpdate(linesUntil(450), 450_000)

@@ -4,7 +4,11 @@ import type { ModelValidationResult, RoleConfig } from '@shared/types'
 import type { CoreContext } from '../context'
 import { handle } from '../ipc/registry'
 import type { ProviderRouting } from '../providers/llm/LLMProvider'
-import { OpenRouterLLM, type ChatFinishedInfo } from '../providers/llm/openrouter'
+import {
+  OpenRouterLLM,
+  type ChatFinishedInfo,
+  type ChatIncompleteInfo,
+} from '../providers/llm/openrouter'
 import { OpenRouterHttp, type FetchLike } from '../providers/openrouterHttp'
 import { ModelCatalog } from './catalog'
 import { testKey } from './keyInfo'
@@ -103,7 +107,31 @@ export function wireModels(ctx: CoreContext, opts: WireModelsOptions = {}): Mode
     }
   }
 
-  const llm = new OpenRouterLLM({ http, log: log.child('llm'), catalog, onFinished })
+  // Cancelled, superseded or failed streams are billed for what was generated before they
+  // stopped; their cost arrives later from GET /generation. Spend only, no latency sample.
+  const onIncomplete = (info: ChatIncompleteInfo) => {
+    const s = info.stats
+    try {
+      stats.logUsage({
+        kind: 'llm',
+        model: s.model ?? info.request.model,
+        provider: s.provider ?? null,
+        costUsd: s.costUsd ?? null,
+        tokensIn: s.tokensIn ?? null,
+        tokensOut: s.tokensOut ?? null,
+      })
+    } catch (err) {
+      log.warn('Could not record LLM usage of an unfinished request', err)
+    }
+  }
+
+  const llm = new OpenRouterLLM({
+    http,
+    log: log.child('llm'),
+    catalog,
+    onFinished,
+    onIncomplete,
+  })
   const latency = new LatencyTester({
     llm,
     stats,
