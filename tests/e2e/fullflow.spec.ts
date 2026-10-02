@@ -10,7 +10,10 @@ import { expect, test, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { MockOpenRouter } from '../../scripts/mock-openrouter.mjs'
+import type {
+  MockOpenRouter,
+  startMockOpenRouter as StartMock,
+} from '../../scripts/mock-openrouter.mjs'
 import { launchApp, type LaunchedApp } from './helpers'
 
 test.describe.configure({ mode: 'serial' })
