@@ -592,9 +592,12 @@ test.afterAll(async () => {
 })
 
 test('first run shows onboarding from the slot, then the home page', async () => {
-  await expect(page.getByTestId('onboarding-placeholder')).toBeVisible()
+  await expect(page.getByTestId('onboarding')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Close' }).first()).toBeVisible()
-  await page.getByRole('button', { name: 'Get started' }).click()
+  // The real onboarding is covered by settingsui.spec.ts; finish it directly here.
+  await page.evaluate(() =>
+    window.bluely.invoke('settings:update', { patch: { general: { onboardingComplete: true } } }),
+  )
   await expect(page.getByTestId('home-page')).toBeVisible()
   const env = await page.evaluate(() => window.bluely.invoke('settings:get', undefined))
   expect(env.ok && env.data.general.onboardingComplete).toBe(true)
@@ -893,11 +896,11 @@ test('live session: Start → Stop with timer → Generating notes', async () =>
 
 test('settings:open event and the avatar open the Settings slot', async () => {
   await push(ctx.app, 'settings:open', { page: 'models' })
-  await expect(page.getByTestId('settings-placeholder')).toContainText('models')
+  await expect(page.getByTestId('settings-page-models')).toBeVisible()
   await page.keyboard.press('Escape')
-  await expect(page.getByTestId('settings-placeholder')).toHaveCount(0)
+  await expect(page.getByTestId('settings-nav')).toHaveCount(0)
   await page.getByRole('button', { name: /^Settings/ }).click()
-  await expect(page.getByTestId('settings-placeholder')).toBeVisible()
+  await expect(page.getByTestId('settings-page-general')).toBeVisible()
   await page.keyboard.press('Escape')
 })
 
@@ -914,7 +917,7 @@ test('first-run empty state with no key', async () => {
   await expect(page.getByRole('button', { name: 'Add your OpenRouter key' })).toHaveCount(2)
   await bothThemes(page, 'home-empty-nokey')
   await page.getByRole('button', { name: 'Add your OpenRouter key' }).first().click()
-  await expect(page.getByTestId('settings-placeholder')).toContainText('models')
+  await expect(page.getByTestId('settings-page-models')).toBeVisible()
   await page.keyboard.press('Escape')
 })
 

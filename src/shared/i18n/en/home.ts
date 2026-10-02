@@ -83,11 +83,4 @@ export const home = {
     askAgain: 'Ask again',
     askFailed: 'Couldn’t ask Bluely',
   },
-  placeholder: {
-    settingsTitle: 'Settings',
-    settingsBody: 'Settings are loading in a future build.',
-    onboardingTitle: 'Welcome to Bluely',
-    onboardingBody: 'Your open-source AI meeting copilot.',
-    onboardingStart: 'Get started',
-  },
 } as const
