@@ -33,6 +33,7 @@ your own computer. There is no Bluely server and no account: you bring your own
 ## Contents
 
 - [Features](#features)
+- [Screenshots](#screenshots)
 - [Install](#install)
 - [Get an OpenRouter key](#get-an-openrouter-key)
 - [First run](#first-run)
@@ -72,6 +73,18 @@ your own computer. There is no Bluely server and no account: you bring your own
   provider and model. Settings › AI Models has a latency test to pick the fastest model for you.
 - **Local-first.** Your history lives in `%APPDATA%\Bluely` on your PC. Network calls go only to
   OpenRouter (AI) and GitHub (update checks). No telemetry, no accounts, no Bluely server.
+
+## Screenshots
+
+| Overlay during a call | History |
+| --- | --- |
+| <img src="docs/screenshots/overlay.png" alt="Bluely overlay showing an automatic suggestion and the speed readout during a call" /> | <img src="docs/screenshots/main-window.png" alt="Bluely main window with meetings grouped by day" /> |
+| **Notes after the call** | **Settings** |
+| <img src="docs/screenshots/session-notes.png" alt="Session page with the generated summary, key points and decisions" /> | <img src="docs/screenshots/settings.png" alt="Bluely settings, General page" /> |
+
+Screenshots are generated from the real app against a local mock of the OpenRouter API
+(`BLUELY_SCREENSHOTS=1 pnpm exec playwright test tests/e2e/screenshots.spec.ts`); the call in the
+background is a generic placeholder.
 
 ## Install
 
