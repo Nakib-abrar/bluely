@@ -4,6 +4,11 @@ import { errors } from './errors'
 import { home } from './home'
 import { keybinds } from './keybinds'
 import { live } from './live'
+import { models } from './models'
+import { history } from './history'
+import { knowledge } from './knowledge'
+import { updater } from './updater'
+import { exportLabels } from './exportLabels'
 import { onboarding } from './onboarding'
 import { overlay } from './overlay'
 import { session } from './session'
@@ -20,4 +25,9 @@ export const en = {
   settings,
   overlay,
   live,
+  models,
+  history,
+  knowledge,
+  updater,
+  exportLabels,
 } as const

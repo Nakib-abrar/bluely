@@ -11,4 +11,7 @@ export const keybinds = {
   devPanel: 'Latency dev panel',
   global: 'Global',
   local: 'When Bluely is focused',
+  taken: 'Taken by another app',
+  invalid: 'Invalid shortcut',
+  duplicate: 'Used by another Bluely shortcut',
 } as const

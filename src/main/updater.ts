@@ -1,4 +1,5 @@
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
+import { updater as updaterMessages } from '@shared/i18n/en/updater'
 import { RELEASES_URL } from '@shared/constants'
 import type { UpdateStatus } from '@shared/types'
 import type { CoreContext } from './context'
@@ -21,17 +22,8 @@ export const AUTO_CHECK_POLL_MS = 15 * 60 * 1000
  * English status texts shown in Settings › General.
  * TODO(i18n): move to an `updater` i18n namespace once the contract has one (see packaging report).
  */
-export const UPDATER_MESSAGES = {
-  unpackaged: 'Updates are checked in installed builds.',
-  portable: "Portable builds don't auto-update; download the latest release.",
-  offline: 'Could not reach GitHub to check for updates. Check your internet connection.',
-  noRelease: 'No update information was found on GitHub.',
-  rateLimited: 'GitHub is limiting update checks right now. Try again later.',
-  integrity: 'The downloaded update failed its integrity check and was discarded. Try again.',
-  failed: 'Update failed: {reason}',
-  noUpdate: 'No update is available to download. Check for updates first.',
-  notDownloaded: 'The update has not been downloaded yet.',
-} as const
+/** Source of truth: src/shared/i18n/en/updater.ts. */
+export const UPDATER_MESSAGES = updaterMessages
 
 export interface UpdaterOptions {
   events: Pick<EventBus, 'broadcast'>

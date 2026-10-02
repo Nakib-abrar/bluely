@@ -59,9 +59,15 @@ export interface ShortcutManagerDeps {
  * TODO(i18n): "taken", "invalid" and "duplicate" need keys in the keybinds namespace (contract request).
  */
 export const KEYBIND_STATUS_ERRORS = {
-  taken: 'Taken by another app',
-  invalid: 'Invalid shortcut',
-  duplicate: 'Used by another Bluely shortcut',
+  get taken(): string {
+    return t('keybinds.taken')
+  },
+  get invalid(): string {
+    return t('keybinds.invalid')
+  },
+  get duplicate(): string {
+    return t('keybinds.duplicate')
+  },
   get disabled(): string {
     return t('common.disabled')
   },

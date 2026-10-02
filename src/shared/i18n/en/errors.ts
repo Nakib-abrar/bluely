@@ -13,4 +13,5 @@ export const errors = {
   model_unavailable:
     'That model is not available right now. Pick another one in Settings › AI Models.',
   unknown: 'Something went wrong. Try again.',
+  invalid_audio: 'That audio could not be read. Try recording again.',
 } as const
