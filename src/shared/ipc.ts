@@ -303,6 +303,8 @@ export type IpcEnvelope<T> = { ok: true; data: T } | { ok: false; error: IpcErro
 
 export interface EventContract {
   'settings:changed': Settings
+  /** The OpenRouter key was saved or removed. */
+  'key:changed': KeyStatus
   'session:state': LiveSessionState
   /** Upsert by id (partial → final updates arrive with the same id). */
   'transcript:line': TranscriptLine
@@ -338,6 +340,7 @@ export type EventPayload<E extends EventChannel> = EventContract[E]
 export const INVOKE_CHANNELS = Object.keys(invokeContract) as InvokeChannel[]
 export const EVENT_CHANNELS: EventChannel[] = [
   'settings:changed',
+  'key:changed',
   'session:state',
   'transcript:line',
   'transcript:remove',

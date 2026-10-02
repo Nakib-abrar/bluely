@@ -110,9 +110,14 @@ export class OverlayController {
 
   focus(): void {
     const win = this.ensure()
-    if (!win.isVisible()) win.show()
-    win.focus()
-    win.webContents.focus()
+    const reveal = () => {
+      if (!win.isVisible()) win.show()
+      win.focus()
+      win.webContents.focus()
+      this.emitVisibility()
+    }
+    if (win.webContents.isLoading()) win.once('ready-to-show', reveal)
+    else reveal()
   }
 
   setExpanded(expanded: boolean): void {

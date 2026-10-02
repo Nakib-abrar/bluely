@@ -9,6 +9,7 @@ import type { KeyStatus } from '@shared/types'
  */
 export class SecretStore {
   private cache: string | null | undefined
+  private listeners = new Set<() => void>()
 
   constructor(
     private readonly file: string,
@@ -53,11 +54,29 @@ export class SecretStore {
     }
     writeFileSync(this.file, safeStorage.encryptString(trimmed), { mode: 0o600 })
     this.cache = trimmed
+    this.notify()
   }
 
   clear(): void {
     rmSync(this.file, { force: true })
     this.cache = null
+    this.notify()
+  }
+
+  /** Called after the key is saved or removed (e.g. to refresh the "missing key" banner). */
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn)
+    return () => this.listeners.delete(fn)
+  }
+
+  private notify(): void {
+    for (const fn of this.listeners) {
+      try {
+        fn()
+      } catch {
+        /* ignore listener errors */
+      }
+    }
   }
 
   status(): KeyStatus {
