@@ -14,6 +14,7 @@ export default defineConfig({
   },
   test: {
     include: ['tests/unit/**/*.test.ts'],
+    exclude: ['**/node_modules/**', '.claude/**'],
     environment: 'node',
     pool: 'forks',
     testTimeout: 15000,

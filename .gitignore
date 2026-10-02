@@ -15,3 +15,6 @@ playwright-report/
 # Copied from node_modules by scripts/copy-vad-assets.mjs
 src/renderer/public/vad/
 .tsbuild/
+
+# Local agent worktrees / tooling
+.claude/

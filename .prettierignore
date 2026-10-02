@@ -8,3 +8,4 @@ src/renderer/public/vad
 test-results
 playwright-report
 *.md
+.claude
