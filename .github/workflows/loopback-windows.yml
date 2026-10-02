@@ -6,8 +6,9 @@ name: Loopback (Windows)
 # service started first.
 #  - verify: scripts/verify-loopback plays a tone and measures it in the loopback capture, for the
 #    pinned Electron version and its neighbours (docs/VERIFY_LOOPBACK.md).
-#  - capture-e2e: Bluely itself; the audio pipeline (worklet, Silero VAD, WAV) on a fake mic, and
-#    speech played on the speakers → loopback → VAD → transcript line → automatic suggestion.
+#  - capture-e2e: Bluely itself; the audio pipeline (worklet, Silero VAD, WAV) on a fake mic,
+#    speech played on the speakers → loopback → VAD → transcript line → automatic suggestion,
+#    then the packaged Bluely.exe (electron-builder --dir) starting a session with live loopback.
 
 on:
   push:
@@ -104,6 +105,16 @@ jobs:
         run: pnpm exec playwright test tests/e2e/audio.spec.ts tests/e2e/liveaudio.spec.ts
         env:
           BLUELY_E2E_AUDIO: '1'
+
+      - name: Package (electron-builder --dir)
+        run: pnpm dist:dir
+
+      - name: Packaged app smoke test (Bluely.exe)
+        shell: pwsh
+        run: pnpm exec playwright test tests/e2e/packaged.spec.ts
+        env:
+          BLUELY_E2E_AUDIO: '1'
+          BLUELY_PACKAGED_EXE: ${{ github.workspace }}\release\win-unpacked\Bluely.exe
 
       - name: Upload Playwright results
         if: failure()
