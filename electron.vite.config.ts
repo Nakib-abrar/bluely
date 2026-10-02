@@ -69,6 +69,10 @@ export default defineConfig({
         input: {
           main: resolve(__dirname, 'src/renderer/main/index.html'),
           overlay: resolve(__dirname, 'src/renderer/overlay/index.html'),
+          // Dev-only Settings/Onboarding preview page (tests/e2e/settingsui.spec.ts). Never shipped.
+          ...(process.env['BLUELY_PREVIEW'] === '1'
+            ? { settingsPreview: resolve(__dirname, 'src/renderer/settings/preview.html') }
+            : {}),
         },
       },
     },
