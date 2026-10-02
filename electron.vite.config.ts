@@ -69,6 +69,10 @@ export default defineConfig({
         input: {
           main: resolve(__dirname, 'src/renderer/main/index.html'),
           overlay: resolve(__dirname, 'src/renderer/overlay/index.html'),
+          // Dev-only audio test page (tests/e2e/audio.spec.ts); never part of a normal build.
+          ...(process.env['BLUELY_HARNESS'] === '1'
+            ? { harness: resolve(__dirname, 'src/renderer/harness/index.html') }
+            : {}),
         },
       },
     },
