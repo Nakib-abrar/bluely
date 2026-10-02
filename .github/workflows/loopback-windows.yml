@@ -1,0 +1,49 @@
+name: Loopback (Windows)
+
+# Checks that desktop audio (the "Them" channel) can be captured on Windows the way Bluely does
+# it: setDisplayMediaRequestHandler({ audio: 'loopback' }) → getDisplayMedia(). GitHub's Windows
+# runners have no sound card, so a virtual one (VB-CABLE) is installed first; the verifier plays a
+# tone through the default output and measures it in the loopback capture.
+# See docs/VERIFY_LOOPBACK.md.
+
+on:
+  push:
+    paths:
+      - package.json
+      - scripts/verify-loopback/**
+      - src/main/windows/security.ts
+      - .github/workflows/loopback-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Electron ${{ matrix.electron }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        electron: ['42.11.10', '43.7.7', '44.5.1']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install a virtual sound card (VB-CABLE)
+        uses: LABSN/sound-ci-helpers@v1
+
+      - name: Show audio services and devices
+        shell: pwsh
+        run: |
+          Get-Service audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
+          Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
+
+      - name: Verify loopback capture
+        shell: pwsh
+        run: npx --yes electron@${{ matrix.electron }} scripts/verify-loopback/main.cjs --verbose --timeout=60000
