@@ -1,7 +1,8 @@
 /**
- * Resource check during a live session (opt-in: BLUELY_PERF=1). Starts a session with a quiet
- * fake microphone and the PulseAudio loopback, waits, then samples CPU time and memory of every
- * Electron process via app.getAppMetrics().
+ * Resource check (opt-in: BLUELY_PERF=1): the app idle with no session, then a live session with
+ * a quiet fake microphone (room noise) and the desktop loopback. Samples CPU time and memory of
+ * every Electron process via app.getAppMetrics() (all platforms; private bytes on Windows, the
+ * figure Task Manager shows) plus /proc CPU ticks and PSS on Linux.
  */
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
@@ -36,6 +37,45 @@ test('idle CPU and memory during a live session', async () => {
   await ctx.main.evaluate(() =>
     window.bluely.invoke('settings:update', { patch: { general: { onboardingComplete: true } } }),
   )
+  const sample = () =>
+    ctx.app.evaluate(({ app }) =>
+      app.getAppMetrics().map((m) => ({
+        pid: m.pid,
+        type: m.type,
+        cpu: m.cpu.percentCPUUsage,
+        cumulative: m.cpu.cumulativeCPUUsage ?? 0,
+        workingSetMB: Math.round(m.memory.workingSetSize / 1024),
+        // Windows only (KB): memory that belongs to the process alone.
+        privateMB: m.memory.privateBytes != null ? Math.round(m.memory.privateBytes / 1024) : null,
+      })),
+    )
+  type Sample = Awaited<ReturnType<typeof sample>>
+  const sumCum = (xs: Sample) => xs.reduce((s, m) => s + m.cumulative, 0)
+  /** CPU (% of one core, from cumulative CPU seconds) and memory over `ms`. */
+  const window_ = async (label: string, ms: number) => {
+    const a = await sample()
+    const t0 = Date.now()
+    await ctx.main.waitForTimeout(ms)
+    const b = await sample()
+    const secs = (Date.now() - t0) / 1000
+    // Processes that exist in both samples (a renderer can come or go in between).
+    const pids = new Set(a.map((m) => m.pid))
+    const both = b.filter((m) => pids.has(m.pid))
+    const cpu =
+      ((sumCum(both) - sumCum(a.filter((m) => both.some((x) => x.pid === m.pid)))) / secs) * 100
+    const ws = b.reduce((s, m) => s + m.workingSetMB, 0)
+    const priv = b.every((m) => m.privateMB != null)
+      ? b.reduce((s, m) => s + (m.privateMB ?? 0), 0)
+      : null
+    console.log(
+      `[perf] ${label} (${process.platform}): CPU ${cpu.toFixed(1)}% of one core over ${secs.toFixed(0)} s; ` +
+        `working set ${ws} MB${priv != null ? `; private ${priv} MB` : ''}; ` +
+        `per process ${JSON.stringify(b.map((m) => [m.type, m.workingSetMB, m.privateMB]))}`,
+    )
+    return { cpu, ws, priv }
+  }
+  await ctx.main.waitForTimeout(3000) // startup work (model list, DB) settles
+  await window_('app idle, no session', 10_000)
   await ctx.main.evaluate(() => window.bluely.invoke('session:start', {}))
   await expect
     .poll(
@@ -47,16 +87,7 @@ test('idle CPU and memory during a live session', async () => {
     )
     .toBe('live')
   await ctx.main.waitForTimeout(8000) // let VAD/ORT warm up
-  const sample = () =>
-    ctx.app.evaluate(({ app }) =>
-      app.getAppMetrics().map((m) => ({
-        pid: m.pid,
-        type: m.type,
-        cpu: m.cpu.percentCPUUsage,
-        cumulative: m.cpu.cumulativeCPUUsage ?? 0,
-        workingSetMB: Math.round(m.memory.workingSetSize / 1024),
-      })),
-    )
+  await window_('live session (room-noise mic + loopback)', 20_000)
   const a = await sample()
   // CPU ticks straight from /proc (utime + stime), independent of Electron's metrics.
   const ticks = (pid: number) => {
@@ -81,7 +112,6 @@ test('idle CPU and memory during a live session', async () => {
   )
   const seconds = (Date.now() - t0) / 1000
   const totalMem = b.reduce((s, m) => s + m.workingSetMB, 0)
-  const sumCum = (xs: typeof a) => xs.reduce((s, m) => s + m.cumulative, 0)
   const cpuPct = ((sumCum(b) - sumCum(a)) / seconds) * 100
   // Proportional set size (Linux): shared pages are split between the processes that map them.
   const pssMB = (pid: number) => {
