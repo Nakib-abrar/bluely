@@ -106,6 +106,8 @@ export class ShortcutManager {
   private readonly disposers: (() => void)[] = []
   private overlayVisible = false
   private overlayFocused = false
+  private capturing = false
+  private captureTimer: NodeJS.Timeout | null = null
   private disposed = false
   private current: KeybindStatus[] = []
   private lastBroadcast = ''
@@ -138,6 +140,19 @@ export class ShortcutManager {
     this.apply(false)
   }
 
+  /**
+   * While Settings › Keybinds records a new shortcut, every global is released so the OS
+   * doesn't swallow combinations Bluely already owns. Auto-resumes after 30 s as a safety net.
+   */
+  setCapturing(active: boolean): void {
+    if (this.disposed) return
+    if (this.captureTimer) clearTimeout(this.captureTimer)
+    this.captureTimer = active ? setTimeout(() => this.setCapturing(false), 30_000) : null
+    if (active === this.capturing) return
+    this.capturing = active
+    this.apply(false)
+  }
+
   status(): KeybindStatus[] {
     return this.current.map((s) => ({ ...s }))
   }
@@ -152,6 +167,7 @@ export class ShortcutManager {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    if (this.captureTimer) clearTimeout(this.captureTimer)
     for (const acc of this.active.keys()) this.safeUnregister(acc)
     this.active.clear()
     for (const fn of this.disposers.splice(0)) {
@@ -224,7 +240,13 @@ export class ShortcutManager {
     if (this.disposed) return
     const keybinds = this.deps.settings.get().keybinds
     const plans = this.plan(keybinds)
-    const shadowed = new Set(this.overlayFocused ? globalsShadowedByLocals(keybinds) : [])
+    const shadowed = new Set(
+      this.capturing
+        ? plans.flatMap((p) => p.bindings.map((b) => b.accelerator))
+        : this.overlayFocused
+          ? globalsShadowedByLocals(keybinds)
+          : [],
+    )
 
     // What should be registered right now. The first bind (KEYBIND_DEFS order) owns a duplicate.
     const want = new Map<string, Binding>()
@@ -347,6 +369,7 @@ export function wireShortcuts(ctx: CoreContext, actions: ShortcutActions): Short
     actions,
   })
   handle('keybinds:getStatus', () => manager.status())
+  handle('keybinds:setCapturing', ({ active }) => manager.setCapturing(active))
 
   const isOverlay = (win: BrowserWindow) => win === ctx.overlay.window
   const onFocus = (_event: unknown, win: BrowserWindow) => {

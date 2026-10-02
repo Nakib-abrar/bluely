@@ -278,6 +278,8 @@ export const invokeContract = {
 
   // Keybinds & updates
   'keybinds:getStatus': ch(none).returns<KeybindStatus[]>(),
+  /** Settings is recording a new shortcut: release Bluely's global shortcuts meanwhile. */
+  'keybinds:setCapturing': ch(z.object({ active: z.boolean() })).returns<void>(),
   'updater:check': ch(none).returns<UpdateStatus>(),
   'updater:download': ch(none).returns<void>(),
   'updater:install': ch(none).returns<void>(),

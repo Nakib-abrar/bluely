@@ -93,6 +93,16 @@ export function KeybindsPage() {
 
   // Capture mode: listen on window in the capture phase so nothing else (the dialog's Esc
   // handler, focused buttons) sees the keys the user is recording.
+  // Release Bluely's global shortcuts while recording, so the OS doesn't swallow them.
+  const isCapturingAny = capturing !== null
+  useEffect(() => {
+    if (!isCapturingAny) return
+    void invoke('keybinds:setCapturing', { active: true }).catch(() => undefined)
+    return () => {
+      void invoke('keybinds:setCapturing', { active: false }).catch(() => undefined)
+    }
+  }, [isCapturingAny])
+
   useEffect(() => {
     if (!capturing) return
     const def = getKeybindDef(capturing)

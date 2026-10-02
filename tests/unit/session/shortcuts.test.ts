@@ -289,3 +289,25 @@ describe('ShortcutManager', () => {
     expect(late).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('ShortcutManager capture suspension', () => {
+  it('releases every global while Settings records a shortcut, then restores them', () => {
+    vi.useFakeTimers()
+    try {
+      const { gs, manager, statusOf } = setup()
+      manager.setCapturing(true)
+      expect(gs.registered()).toEqual([])
+      // Status keeps reporting the last real outcome while suspended.
+      expect(statusOf('toggleOverlay')?.registered).toBe(true)
+      manager.setCapturing(false)
+      expect(gs.registered()).toEqual(DEFAULT_GLOBALS)
+      // Safety net: forgetting to resume re-registers after 30 s.
+      manager.setCapturing(true)
+      vi.advanceTimersByTime(30_000)
+      expect(gs.registered()).toEqual(DEFAULT_GLOBALS)
+      manager.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

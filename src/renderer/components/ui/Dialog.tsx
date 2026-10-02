@@ -28,10 +28,10 @@ export function Dialog({
   return (
     <D.Root open={open} onOpenChange={onOpenChange}>
       <D.Portal>
-        <D.Overlay className="fixed inset-0 z-40 bg-black/55 animate-fade-in" />
+        <D.Overlay className="fixed inset-0 z-[60] bg-black/55 animate-fade-in" />
         <D.Content
           className={cn(
-            'fixed top-1/2 left-1/2 z-50 w-[min(480px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-panel p-5 shadow-panel animate-fade-in focus:outline-none',
+            'fixed top-1/2 left-1/2 z-[70] w-[min(480px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-panel p-5 shadow-panel animate-fade-in focus:outline-none',
             className,
           )}
         >
