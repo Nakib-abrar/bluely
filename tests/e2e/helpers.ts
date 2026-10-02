@@ -11,9 +11,12 @@ export interface LaunchedApp {
 }
 
 /** Launches the built app (out/) with an isolated data folder. */
-export async function launchApp(env: Record<string, string> = {}): Promise<LaunchedApp> {
+export async function launchApp(
+  env: Record<string, string> = {},
+  extraArgs: string[] = [],
+): Promise<LaunchedApp> {
   const userData = mkdtempSync(join(tmpdir(), 'bluely-e2e-'))
-  const args = ['.']
+  const args = [...extraArgs, '.']
   // Chromium refuses to start as root without this (Linux containers only).
   if (process.platform === 'linux' && process.getuid?.() === 0) args.unshift('--no-sandbox')
   const app = await electron.launch({
