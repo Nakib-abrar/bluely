@@ -30,6 +30,7 @@ const { useUi } = await import('../../../src/renderer/overlay/stores/uiStore')
 const { useLive } = await import('../../../src/renderer/overlay/stores/liveStore')
 const { useSettings } = await import('../../../src/renderer/stores/settings')
 const { createCapture } = await import('../../../src/renderer/overlay/capture')
+const { CaptureController } = await import('../../../src/renderer/audio/captureController')
 
 const runs = () => calls.filter((c) => c.channel === 'ai:run').map((c) => c.payload)
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -204,19 +205,10 @@ describe('overlay actions: errors and shortcuts', () => {
   })
 })
 
-describe('placeholder capture', () => {
-  it('tracks running and completes the stop handshake with audio:stopped', async () => {
+describe('createCapture', () => {
+  it('returns the real audio CaptureController, idle until a session starts', () => {
     const capture = createCapture()
+    expect(capture).toBeInstanceOf(CaptureController)
     expect(capture.running).toBe(false)
-    await capture.start({ sessionId: 's9', micDeviceId: null, sensitivity: 0.5, maxSegmentSec: 12 })
-    expect(capture.running).toBe(true)
-    const unsub = capture.subscribe(() => undefined)
-    unsub()
-    await capture.stop()
-    expect(capture.running).toBe(false)
-    expect(calls).toContainEqual({ channel: 'audio:stopped', payload: { sessionId: 's9' } })
-    calls.length = 0
-    await capture.stop()
-    expect(calls).toEqual([])
   })
 })

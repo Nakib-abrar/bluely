@@ -228,7 +228,7 @@ test('live session: timer, meters, warnings and consent reminder', async () => {
   await expect(
     overlay.getByText('Bluely will suggest replies when they ask a question.'),
   ).toBeVisible()
-  // Fake some audio activity for the screenshot (the placeholder capture reports none).
+  // Fake some audio activity for the screenshot (no real audio devices in CI).
   await overlay.evaluate(() => {
     const fills = document.querySelectorAll<HTMLElement>('.ov-meter-fill')
     fills[0]?.style.setProperty('transform', 'scaleY(0.85)')
@@ -593,7 +593,7 @@ test('stop: Stop button calls session:stop and stopping stops capture', async ()
   await expect(overlay.locator('[data-status="stopping"]')).toBeVisible()
   await expect(overlay.locator('[aria-live="polite"]', { hasText: 'Stopping…' })).toHaveCount(1)
   await expect(overlay.getByRole('button', { name: 'Stop session' })).toBeDisabled()
-  // The placeholder capture completes the stop handshake.
+  // Stopping capture completes the stop handshake.
   await expect.poll(() => calls('audio:stopped')).toEqual([{ sessionId: SESSION }])
   await emit('session:state', liveState({ status: 'idle', sessionId: null, startedAt: null }))
   await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()

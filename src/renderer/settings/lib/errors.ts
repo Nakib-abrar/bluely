@@ -1,6 +1,7 @@
 import { t } from '@shared/i18n'
 import { errors as providerErrors } from '@shared/i18n/en/errors'
 import { IpcError } from '../../lib/ipc'
+import { AudioSourceError } from '../../audio/sources'
 
 type ProviderErrorKey = keyof typeof providerErrors
 
@@ -18,6 +19,18 @@ export function describeError(err: unknown): string {
     if (err.code === 'not_implemented') return t('settings.notAvailable')
     if (isProviderErrorKey(err.code)) return t(`errors.${err.code}`)
     return err.message || t('errors.unknown')
+  }
+  if (err instanceof AudioSourceError) {
+    switch (err.code) {
+      case 'mic_denied':
+        return t('settings.audio.mic.denied')
+      case 'mic_not_found':
+        return t('settings.audio.mic.notFound')
+      case 'mic_muted':
+        return t('settings.audio.mic.busy')
+      default:
+        return err.message || t('errors.unknown')
+    }
   }
   if (err instanceof DOMException) {
     switch (err.name) {

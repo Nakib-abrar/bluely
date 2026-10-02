@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import type { Plugin } from 'vite'
+import { defaultClientConditions, type Plugin } from 'vite'
 
 /** Vite's dev server needs inline scripts (React refresh) and a websocket; production keeps the strict CSP. */
 function devCsp(): Plugin {
@@ -59,7 +59,12 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
     publicDir: resolve(__dirname, 'src/renderer/public'),
-    resolve: { alias },
+    resolve: {
+      alias,
+      // Use onnxruntime-web's build that loads its WASM from /vad/ instead of bundling a
+      // second 14 MB copy into assets/.
+      conditions: ['onnxruntime-web-use-extern-wasm', ...defaultClientConditions],
+    },
     plugins: [react(), tailwindcss(), devCsp()],
     worker: { format: 'es' },
     build: {
@@ -72,6 +77,10 @@ export default defineConfig({
           // Dev-only Settings/Onboarding preview page (tests/e2e/settingsui.spec.ts). Never shipped.
           ...(process.env['BLUELY_PREVIEW'] === '1'
             ? { settingsPreview: resolve(__dirname, 'src/renderer/settings/preview.html') }
+            : {}),
+          // Dev-only audio test page (tests/e2e/audio.spec.ts); never part of a normal build.
+          ...(process.env['BLUELY_HARNESS'] === '1'
+            ? { harness: resolve(__dirname, 'src/renderer/harness/index.html') }
             : {}),
         },
       },
