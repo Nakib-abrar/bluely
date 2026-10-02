@@ -65,6 +65,8 @@ export interface SessionSummaryJson {
   /** Rolling summary of older transcript, updated during the call. */
   runningSummary: string | null
   postCallError: string | null
+  /** True once the user edited the follow-up email; regeneration must not overwrite it. */
+  emailEdited?: boolean
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -284,15 +286,21 @@ export type LiveStatus = 'idle' | 'starting' | 'live' | 'stopping' | 'processing
 
 export type ChannelState = 'off' | 'starting' | 'listening' | 'error'
 
+export type ChannelErrorCode =
+  'mic_not_found' | 'mic_denied' | 'mic_muted' | 'loopback_unavailable' | 'unknown'
+
 export interface ChannelStatus {
   state: ChannelState
   error: string | null
+  /** Machine-readable reason so the UI can show a localized message. */
+  code?: ChannelErrorCode | null
 }
 
 export type SessionWarningCode =
   | 'no_system_audio'
   | 'mic_muted'
   | 'mic_not_found'
+  | 'mic_denied'
   | 'loopback_unavailable'
   | 'stt_error_retrying'
   | 'use_headphones'
@@ -418,6 +426,11 @@ export interface KeybindStatus {
   registered: boolean
   /** e.g. "Taken by another app" */
   error: string | null
+  /**
+   * Why it is not registered. 'inactive' = by design right now (e.g. Move Bluely while the
+   * overlay is hidden), not a problem to show as a warning.
+   */
+  reason?: 'taken' | 'invalid' | 'disabled' | 'duplicate' | 'inactive' | null
 }
 
 export type OverlayCommand =

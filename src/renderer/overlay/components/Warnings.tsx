@@ -44,6 +44,11 @@ const META: Record<SessionWarningCode, WarningMeta> = {
     icon: MicOff,
     action: { label: 'overlay.warnings.openSettings', page: 'general' },
   },
+  mic_denied: {
+    tone: 'error',
+    icon: MicOff,
+    action: { label: 'overlay.warnings.openSettings', page: 'general' },
+  },
   loopback_unavailable: { tone: 'error', icon: VolumeX },
   no_system_audio: { tone: 'warning', icon: VolumeX, dismissible: true },
   mic_muted: { tone: 'warning', icon: MicOff },
@@ -54,6 +59,7 @@ const META: Record<SessionWarningCode, WarningMeta> = {
 /** Most important first. */
 const ORDER: SessionWarningCode[] = [
   'no_key',
+  'mic_denied',
   'mic_not_found',
   'loopback_unavailable',
   'stt_error_retrying',

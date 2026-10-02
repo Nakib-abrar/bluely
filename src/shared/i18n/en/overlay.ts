@@ -75,6 +75,8 @@ export const overlay = {
     no_system_audio: 'No system audio detected — is the call audio playing on this PC?',
     mic_muted: 'Your microphone is muted.',
     mic_not_found: 'No microphone found. Check your audio settings.',
+    mic_denied:
+      'Bluely is not allowed to use the microphone. Allow it in Windows privacy settings.',
     loopback_unavailable: 'Can’t capture system audio here. Only your microphone is transcribed.',
     stt_error_retrying: 'Transcription error (retrying)…',
     use_headphones: 'Tip: use headphones for the cleanest transcript.',

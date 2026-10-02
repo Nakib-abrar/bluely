@@ -176,6 +176,10 @@ export const invokeContract = {
       channel: channelSchema,
       state: z.enum(['off', 'starting', 'listening', 'error']),
       error: z.string().max(500).nullable(),
+      code: z
+        .enum(['mic_not_found', 'mic_denied', 'mic_muted', 'loopback_unavailable', 'unknown'])
+        .nullable()
+        .optional(),
     }),
   ).returns<void>(),
   'audio:warning': ch(
@@ -185,6 +189,7 @@ export const invokeContract = {
         'no_system_audio',
         'mic_muted',
         'mic_not_found',
+        'mic_denied',
         'loopback_unavailable',
         'use_headphones',
       ]),
@@ -242,7 +247,17 @@ export const invokeContract = {
   'sessions:get': ch(z.object({ id })).returns<SessionDetail | null>(),
   'sessions:rename': ch(z.object({ id, title: z.string().trim().min(1).max(200) })).returns<void>(),
   'sessions:delete': ch(z.object({ id })).returns<void>(),
-  'sessions:regenerate': ch(z.object({ id })).returns<void>(),
+  /** Regenerate post-call output. `parts` limits it (default: the parts that are missing). */
+  'sessions:regenerate': ch(
+    z.object({
+      id,
+      parts: z
+        .array(z.enum(['notes', 'actions', 'email']))
+        .min(1)
+        .max(3)
+        .optional(),
+    }),
+  ).returns<void>(),
   'sessions:updateEmail': ch(
     z.object({ id, subject: z.string().max(500), body: z.string().max(50_000) }),
   ).returns<void>(),
