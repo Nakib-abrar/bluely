@@ -180,10 +180,19 @@ export class RetentionScheduler {
   runNow(): Promise<number> {
     if (this.disposed) return Promise.resolve(0)
     if (this.queued) return this.queued
-    const run = this.tail.then(() => {
-      this.queued = null
-      return this.runOnce()
-    })
+    const run: Promise<number> = this.tail
+      .then(() => {
+        this.queued = null
+        return this.runOnce()
+      })
+      // runOnce handles its own errors. This is the backstop: a rejected link would otherwise
+      // stay in `tail` and `queued` forever, so every later run would return the same rejection
+      // and retention would stop until the next launch.
+      .catch((err: unknown) => {
+        if (this.queued === run) this.queued = null
+        this.opts.log.error('Retention run failed', err)
+        return 0
+      })
     this.queued = run
     this.tail = run
     return run
@@ -192,9 +201,10 @@ export class RetentionScheduler {
   private async runOnce(): Promise<number> {
     if (this.disposed) return 0
     const { db, log, screenshotsDir } = this.opts
-    const days = this.opts.settings.get().privacy.retentionDays
+    let days: RetentionDays = 0
     let deleted = 0
     try {
+      days = this.opts.settings.get().privacy.retentionDays
       await applyRetention(db, days, (this.opts.now ?? Date.now)(), {
         ...this.opts.batch,
         screenshotsDir,
@@ -213,7 +223,11 @@ export class RetentionScheduler {
     }
     if (deleted > 0) {
       log.info(`Retention: deleted ${deleted} session(s) older than ${days} days`)
-      this.opts.onDeleted?.(deleted)
+      try {
+        this.opts.onDeleted?.(deleted)
+      } catch (err) {
+        log.error('Retention: refreshing after the purge failed', err)
+      }
     }
     return deleted
   }

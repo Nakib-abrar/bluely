@@ -415,6 +415,55 @@ describe('RetentionScheduler', () => {
     t.scheduler.dispose()
   })
 
+  it('keeps running after an onDeleted listener throws', async () => {
+    const t = setup(90)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    t.onDeleted.mockImplementationOnce(() => {
+      throw new Error('boom')
+    })
+    // The failing listener is logged; the run still resolves with what it deleted.
+    expect(await t.scheduler.runNow()).toBe(1)
+    expect(error).toHaveBeenCalled()
+    expect(t.r.sessions.list().map((s) => s.id)).toEqual(['new', 'mid'])
+    // The next run is not stuck on the failed one: the next expired meeting is purged.
+    t.advance(45 * DAY)
+    expect(await t.scheduler.runNow()).toBe(1)
+    expect(t.r.sessions.list().map((s) => s.id)).toEqual(['new'])
+    expect(t.onDeleted).toHaveBeenCalledTimes(2)
+    error.mockRestore()
+    t.scheduler.dispose()
+  })
+
+  it('keeps running after reading the settings fails', async () => {
+    const t = setup(90)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(t.settings, 'get').mockImplementationOnce(() => {
+      throw new Error('settings unavailable')
+    })
+    expect(await t.scheduler.runNow()).toBe(0)
+    expect(error).toHaveBeenCalled()
+    expect(t.r.sessions.list()).toHaveLength(3)
+    expect(await t.scheduler.runNow()).toBe(1)
+    expect(t.r.sessions.list().map((s) => s.id)).toEqual(['new', 'mid'])
+    error.mockRestore()
+    t.scheduler.dispose()
+  })
+
+  it('never leaves the run queue stuck on a failed run', async () => {
+    const t = setup(90)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // Whatever slips past runOnce's own handling must not reject runNow or block later runs.
+    const inner = t.scheduler as unknown as { runOnce: () => Promise<number> }
+    vi.spyOn(inner, 'runOnce').mockRejectedValueOnce(new Error('boom'))
+    expect(await t.scheduler.runNow()).toBe(0)
+    expect(error).toHaveBeenCalled()
+    expect(t.r.sessions.list()).toHaveLength(3)
+    expect(await t.scheduler.runNow()).toBe(1)
+    expect(t.r.sessions.list().map((s) => s.id)).toEqual(['new', 'mid'])
+    error.mockRestore()
+    t.scheduler.dispose()
+  })
+
   it('does not keep the process alive with real timers', async () => {
     const r = makeRepos()
     const settings = new SettingsStore(r.db)
