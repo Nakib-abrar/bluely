@@ -3,6 +3,8 @@ import { t } from '@shared/i18n'
 import { cn } from '../../components/ui'
 import { useSettings } from '../../stores/settings'
 import { useKeyHealth } from '../hooks/useKeyHealth'
+import { useModes } from '../hooks/useModes'
+import { activeMode, answeringModel } from '../lib/activeModel'
 import { shortModelId } from '../lib/text'
 import { useNav } from '../router'
 
@@ -12,7 +14,10 @@ export function KeySubtitle({ className }: { className?: string }) {
   const status = useKeyHealth((s) => s.status)
   const check = useKeyHealth((s) => s.check)
   const error = useKeyHealth((s) => s.error)
-  const model = useSettings((s) => s.settings.models.smart.model)
+  const models = useSettings((s) => s.settings.models)
+  const activeModeId = useSettings((s) => s.settings.activeModeId)
+  const modes = useModes()
+  const model = answeringModel(models, activeMode(modes, activeModeId))
   const base = 'flex h-5 max-w-[300px] items-center justify-center gap-1.5 text-[12px]'
 
   if (!status) {

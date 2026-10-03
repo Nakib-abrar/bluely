@@ -1,3 +1,5 @@
+import { t } from '@shared/i18n'
+
 /** 5375000 → "1:29:35", 83000 → "1:23" (matches the session list duration badge). */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '0:00'
@@ -53,6 +55,6 @@ export function formatUsd(v: number | null | undefined): string {
 export function formatPerMillion(perToken: number | null | undefined): string {
   if (perToken == null) return '—'
   const perM = perToken * 1_000_000
-  if (perM === 0) return 'free'
+  if (perM === 0) return t('common.free')
   return `$${perM < 1 ? perM.toFixed(3) : perM.toFixed(2)}/M`
 }

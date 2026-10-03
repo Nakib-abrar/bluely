@@ -1,11 +1,26 @@
-import { useCallback, useMemo, useReducer, useState } from 'react'
+import { useCallback, useMemo, useReducer, useRef, useState } from 'react'
 import type { MainWindowRoute, SettingsPage } from '@shared/types'
 import { useIpcEvent } from '../../hooks/useIpcEvent'
-import { currentRoute, initialRouterState, routerReducer, type Nav } from '../router'
+import {
+  currentRoute,
+  homeFocusAfterBack,
+  initialRouterState,
+  routerReducer,
+  type Nav,
+  type RouterState,
+} from '../router'
 
 export interface SettingsUi {
   open: boolean
   page: SettingsPage | null
+}
+
+/** Focus to restore on the home page after going back (see homeFocusAfterBack). */
+export interface HomeFocusRequest {
+  /** History row to focus; null = the home page itself. */
+  sessionId: string | null
+  /** Changes on every request, so going back to the same row twice still refocuses it. */
+  seq: number
 }
 
 export interface MainNavState {
@@ -20,6 +35,8 @@ export interface MainNavState {
   setSettingsPage(page: SettingsPage): void
   /** Leaves onboarding for the home page. */
   goHome(): void
+  /** Latest focus request for the home page; App applies it once home is visible. */
+  homeFocus: HomeFocusRequest | null
 }
 
 /**
@@ -33,11 +50,24 @@ export function useMainNav(): MainNavState {
   const [settingsUi, setSettingsUi] = useState<SettingsUi>({ open: false, page: null })
   const searching = query.trim().length > 0
   const canGoBack = searching || router.stack.length > 1
+  const [homeFocus, setHomeFocus] = useState<HomeFocusRequest | null>(null)
+  const focusSeq = useRef(0)
+
+  const goBack = useCallback((state: RouterState, deleted: boolean) => {
+    const target = homeFocusAfterBack(state, { deleted })
+    if (target !== undefined) setHomeFocus({ sessionId: target, seq: ++focusSeq.current })
+    dispatch({ type: 'back' })
+  }, [])
 
   const back = useCallback(() => {
     if (query) setQuery('')
-    else dispatch({ type: 'back' })
-  }, [query])
+    else goBack(router, false)
+  }, [query, router, goBack])
+
+  const backAfterDelete = useCallback(() => {
+    setQuery('')
+    goBack(router, true)
+  }, [router, goBack])
 
   const goHome = useCallback(() => {
     setQuery('')
@@ -49,6 +79,7 @@ export function useMainNav(): MainNavState {
       route,
       canGoBack,
       back,
+      backAfterDelete,
       goHome,
       openSession(sessionId, tab) {
         setQuery('')
@@ -61,7 +92,7 @@ export function useMainNav(): MainNavState {
         setSettingsUi({ open: true, page: page ?? null })
       },
     }),
-    [route, canGoBack, back, goHome],
+    [route, canGoBack, back, backAfterDelete, goHome],
   )
 
   useIpcEvent('navigate', (r) => {
@@ -80,5 +111,6 @@ export function useMainNav(): MainNavState {
     setSettingsOpen: (open) => setSettingsUi((s) => ({ ...s, open })),
     setSettingsPage: (page) => setSettingsUi((s) => ({ ...s, page })),
     goHome,
+    homeFocus,
   }
 }

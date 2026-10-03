@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { ArrowUp, MessagesSquare } from 'lucide-react'
 import { t } from '@shared/i18n'
 import type { AiCard } from '@shared/types'
@@ -10,10 +10,26 @@ import { pendingCard } from '../lib/aiReducer'
 import { useNav } from '../router'
 import { toast } from '../stores/toast'
 
-interface Asked {
+/** A question sent with 'sessions:chat' whose ai:card may not have arrived yet. */
+export interface AskedQuestion {
   id: string
   question: string
   createdAt: number
+}
+
+/**
+ * Chat state that must survive switching tabs (inactive tab panels unmount), so the meeting
+ * page owns it: the unsent question and the questions still waiting for their card.
+ */
+export interface ChatDraft {
+  input: string
+  asked: AskedQuestion[]
+}
+
+export interface ChatTabProps {
+  sessionId: string
+  draft: ChatDraft
+  setDraft: Dispatch<SetStateAction<ChatDraft>>
 }
 
 let localIds = 0
@@ -30,11 +46,11 @@ function Bubble({ text }: { text: string }) {
 }
 
 /** "Ask about this meeting": history from 'ai:getCards', new questions via 'sessions:chat'. */
-export function ChatTab({ sessionId }: { sessionId: string }) {
+export function ChatTab({ sessionId, draft, setDraft }: ChatTabProps) {
   const nav = useNav()
   const cards = useMeetingChatCards(sessionId)
-  const [asked, setAsked] = useState<Asked[]>([])
-  const [input, setInput] = useState('')
+  const { asked, input } = draft
+  const setInput = (value: string) => setDraft((d) => ({ ...d, input: value }))
   const [sending, setSending] = useState(false)
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -69,8 +85,10 @@ export function ChatTab({ sessionId }: { sessionId: string }) {
     stick.current = true
     invoke('sessions:chat', { id: sessionId, question })
       .then(({ id }) => {
-        setAsked((list) => [...list, { id, question, createdAt: Date.now() }])
-        setInput('')
+        setDraft((d) => ({
+          input: '',
+          asked: [...d.asked, { id, question, createdAt: Date.now() }],
+        }))
       })
       .catch((err: unknown) => {
         const id = `local-chat-${++localIds}`

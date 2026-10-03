@@ -28,6 +28,13 @@ export const session = {
     failed: 'Notes couldn’t be generated',
     retry: 'Retry',
     regenerateFailed: 'Couldn’t start generating notes',
+    /** One failed post-call part: "Follow-up email: The model timed out." */
+    partError: '{part}: {message}',
+    part: {
+      notes: 'Notes',
+      actions: 'Action items',
+      email: 'Follow-up email',
+    },
   },
   tabs: {
     notes: 'Notes',

@@ -27,6 +27,7 @@ export function SessionRow({ session, onOpen, onDelete }: SessionRowProps) {
         type="button"
         onClick={onOpen}
         aria-label={label}
+        data-session-id={session.id}
         className="flex h-full min-w-0 flex-1 items-center gap-3 rounded-[10px] pr-1 pl-3.5 text-left focus-visible:-outline-offset-2"
       >
         <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-fg">{title}</span>

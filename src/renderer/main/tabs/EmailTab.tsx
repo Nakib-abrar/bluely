@@ -41,21 +41,41 @@ function SaveIndicator({ state }: { state: SaveState }) {
   return null
 }
 
-/** Editable follow-up email; autosaves 600 ms after the last keystroke. */
+/**
+ * Editable follow-up email; autosaves 600 ms after the last keystroke.
+ *
+ * `draft` only holds edits that are not saved yet. Once the latest edit is saved the tab shows
+ * `detail.email` again, so a newer email from main (regenerated notes, another window) is never
+ * hidden behind a stale local copy, and what "Open in mail app" sends (main reads the stored
+ * email) is always what the tab shows.
+ */
 export function EmailTab({ detail, patch }: EmailTabProps) {
   const id = detail.id
-  // Local draft while editing: a server refresh must never overwrite what is being typed.
+  // Unsaved local edits: a server refresh must never overwrite what is being typed.
   const [draft, setDraft] = useState<FollowUpEmail | null>(null)
   const [save, setSave] = useState<SaveState>('idle')
   const email = draft ?? detail.email ?? { subject: '', body: '' }
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const latest = useRef<FollowUpEmail>(email)
+  const latest = useRef<FollowUpEmail | null>(null)
+  const inflight = useRef<Promise<void> | null>(null)
 
   const persist = useCallback(
-    (next: FollowUpEmail) =>
-      invoke('sessions:updateEmail', { id, subject: next.subject, body: next.body }).then(() =>
-        patch((d) => ({ ...d, email: next })),
-      ),
+    (next: FollowUpEmail): Promise<void> => {
+      const run = invoke('sessions:updateEmail', { id, subject: next.subject, body: next.body })
+        .then(() => {
+          patch((d) => ({ ...d, email: next }))
+          // Saved and nothing newer typed since: show the stored email from now on.
+          if (latest.current === next && !timer.current) {
+            latest.current = null
+            setDraft(null)
+          }
+        })
+        .finally(() => {
+          if (inflight.current === run) inflight.current = null
+        })
+      inflight.current = run
+      return run
+    },
     [id, patch],
   )
 
@@ -73,12 +93,25 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
     }, EMAIL_AUTOSAVE_MS)
   }
 
-  /** Saves immediately if a debounced save is still waiting. */
+  /**
+   * Makes sure the stored email equals what is on screen: saves a pending or failed edit now
+   * and waits for a save that is already running.
+   */
   const flush = useCallback(async () => {
-    if (!timer.current) return
-    clearTimeout(timer.current)
-    timer.current = null
-    await persist(latest.current)
+    if (timer.current) {
+      clearTimeout(timer.current)
+      timer.current = null
+    }
+    if (inflight.current) await inflight.current.catch(() => undefined)
+    const unsaved = latest.current
+    if (unsaved) {
+      setSave('saving')
+      await persist(unsaved).catch((err: unknown) => {
+        setSave('error')
+        throw err
+      })
+      setSave('saved')
+    }
   }, [persist])
 
   // Leaving the tab (or the page) must not lose the last keystrokes.
@@ -86,7 +119,7 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
     const pending = timer
     const last = latest
     return () => {
-      if (!pending.current) return
+      if (!pending.current || !last.current) return
       clearTimeout(pending.current)
       pending.current = null
       persist(last.current).catch((err: unknown) =>
@@ -102,6 +135,7 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
   }
 
   const openMail = () => {
+    // Main builds the mail draft from the stored email, so store what is shown first.
     flush()
       .then(() => invoke('sessions:openMailDraft', { id }))
       .catch((err: unknown) =>
@@ -109,6 +143,7 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
       )
   }
 
+  // While the email is still being written, typing would race the generated one.
   const generating = !detail.email && !draft && detail.status === 'processing'
 
   return (
@@ -125,10 +160,22 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
           <SaveIndicator state={save} />
         )}
         <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" variant="secondary" icon={<Copy size={13} />} onClick={copy}>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Copy size={13} />}
+            onClick={copy}
+            disabled={generating}
+          >
             {t('session.email.copy')}
           </Button>
-          <Button size="sm" variant="primary" icon={<Mail size={13} />} onClick={openMail}>
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<Mail size={13} />}
+            onClick={openMail}
+            disabled={generating}
+          >
             {t('session.email.openMail')}
           </Button>
         </div>
@@ -140,6 +187,7 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
           value={email.subject}
           placeholder={t('session.email.subjectPlaceholder')}
           onChange={(e) => change({ ...email, subject: e.target.value })}
+          disabled={generating}
           className="mb-4"
         />
         <Label htmlFor="email-body">{t('session.email.body')}</Label>
@@ -148,6 +196,7 @@ export function EmailTab({ detail, patch }: EmailTabProps) {
           value={email.body}
           placeholder={t('session.email.bodyPlaceholder')}
           onChange={(e) => change({ ...email, body: e.target.value })}
+          disabled={generating}
           rows={14}
           className="min-h-[280px]"
         />

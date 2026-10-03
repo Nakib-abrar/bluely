@@ -34,6 +34,14 @@ export const home = {
   notices: {
     actionFailed: 'That didn’t work. Try again.',
     regenerating: 'Generating notes…',
+    installLiveTitle: 'Stop the call and restart?',
+    installLiveBody:
+      'Installing the update restarts Bluely, which stops the call that is in progress. You can generate notes for it later from the meeting page.',
+    installLiveConfirm: 'Stop call and restart',
+    installProcessingTitle: 'Restart while notes are being written?',
+    installProcessingBody:
+      'Notes for your last meeting are not finished yet. Restarting interrupts them; you can generate them again from the meeting page.',
+    installProcessingConfirm: 'Restart now',
   },
   list: {
     loadMore: 'Load more',

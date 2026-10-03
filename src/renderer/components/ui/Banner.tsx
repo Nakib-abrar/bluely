@@ -1,5 +1,6 @@
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { t } from '@shared/i18n'
 import { cn } from './cn'
 
 export type BannerTone = 'info' | 'warning' | 'success' | 'error'
@@ -50,7 +51,7 @@ export function Banner({
       {onDismiss ? (
         <button
           type="button"
-          aria-label="Dismiss"
+          aria-label={t('common.dismiss')}
           onClick={onDismiss}
           className="no-drag -mr-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-panel-3 hover:text-fg"
         >
