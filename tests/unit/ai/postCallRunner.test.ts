@@ -138,6 +138,115 @@ describe('PostCallRunner', () => {
     })
   })
 
+  it('Retry of a failed email never replaces the email the user wrote since', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['notes', 'email'])
+    await h.run()
+    expect(h.detail().email).toBeNull()
+    expect(h.detail().postCallError).toMatch(/^notes: .+ · email: .+$/)
+    // The Email tab is editable while there is no email: the user writes their own.
+    h.editEmail({ subject: 'Written by me', body: 'My own words' })
+    // The failed-parts banner still lists both parts and retries exactly those.
+    h.llm.failing.clear()
+    h.llm.replies.notes = NOTES('Second')
+    h.llm.replies.email = EMAIL('Generated')
+    h.llm.requests = []
+    await h.run(['notes', 'email'])
+    expect(h.requestedParts()).toEqual(['notes'])
+    const d = h.detail()
+    expect(d.email).toEqual({ subject: 'Written by me', body: 'My own words' })
+    expect(d.notes?.title).toBe('Second')
+    // The email failure is resolved, so the banner no longer offers it.
+    expect(d.postCallError).toBeNull()
+    expect(d.status).toBe('done')
+  })
+
+  it('Retry of only the email part keeps the written email and clears its error', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['email'])
+    await h.run()
+    h.editEmail({ subject: 'Written by me', body: 'My own words' })
+    h.llm.failing.clear()
+    h.llm.replies.email = EMAIL('Generated')
+    h.llm.requests = []
+    await h.run(['email'])
+    // Nothing to generate (an empty parts list must not mean "all parts").
+    expect(h.requestedParts()).toEqual([])
+    let d = h.detail()
+    expect(d.email).toEqual({ subject: 'Written by me', body: 'My own words' })
+    expect(d.postCallError).toBeNull()
+    expect(d.status).toBe('done')
+    // With no failure pending, asking for the email explicitly still regenerates it.
+    await h.run(['email'])
+    d = h.detail()
+    expect(d.email).toEqual({ subject: 'Generated', body: 'Generated body' })
+  })
+
+  it('still retries a failed email the user typed and then cleared', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['email'])
+    await h.run()
+    h.editEmail({ subject: ' ', body: '' })
+    h.llm.failing.clear()
+    h.llm.requests = []
+    await h.run(['email'])
+    expect(h.requestedParts()).toEqual(['email'])
+    expect(h.detail().email).toEqual({ subject: 'Hi', body: 'Hi body' })
+    expect(h.detail().postCallError).toBeNull()
+  })
+
+  it('clears the email error when the user writes the email while its retry fails', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['email'])
+    await h.run()
+    let release!: () => void
+    h.llm.gate = new Promise<void>((r) => (release = r))
+    const running = h.run(['email'])
+    await vi.waitFor(() => expect(h.llm.requests.length).toBeGreaterThan(3))
+    h.editEmail({ subject: 'Typed meanwhile', body: 'Mine' })
+    release()
+    await running
+    const d = h.detail()
+    expect(d.email).toEqual({ subject: 'Typed meanwhile', body: 'Mine' })
+    expect(d.postCallError).toBeNull()
+  })
+
+  it('a deliberate email regenerate that fails keeps the edited email and reports it', async () => {
+    const h = setup()
+    await h.run()
+    h.editEmail({ subject: 'Edited', body: 'Edited body' })
+    h.llm.failing = new Set(['email'])
+    await h.run(['email'])
+    const d = h.detail()
+    expect(d.email).toEqual({ subject: 'Edited', body: 'Edited body' })
+    expect(d.postCallError).toMatch(/^email: /)
+  })
+
+  it('replaces the dated fallback title once notes succeed, never a name the user gave', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['notes'])
+    await h.run()
+    const fallback = h.detail().title
+    expect(fallback).toMatch(/^Meeting on /)
+    h.llm.failing.clear()
+    h.llm.replies.notes = NOTES('Pricing call')
+    await h.run(['notes'])
+    expect(h.detail().title).toBe('Pricing call')
+    // A generated title stays put on later regenerates.
+    h.llm.replies.notes = NOTES('Other title')
+    await h.run(['notes'])
+    expect(h.detail().title).toBe('Pricing call')
+
+    const u = setup()
+    u.llm.failing = new Set(['notes'])
+    await u.run()
+    u.history.sessions.rename(u.session.id, 'Call with Priya')
+    u.llm.failing.clear()
+    await u.run(['notes'])
+    expect(u.detail().title).toBe('Call with Priya')
+    expect(u.detail().notes?.title).toBe('First')
+  })
+
   it('keeps an email the user saves while generation is running', async () => {
     const h = setup()
     h.llm.failing = new Set(['email'])
