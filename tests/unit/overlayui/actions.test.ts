@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AiCard } from '@shared/types'
+import type { AiCard, LiveSessionState } from '@shared/types'
 
 interface Call {
   channel: string
@@ -9,6 +9,8 @@ interface Call {
 const calls: Call[] = []
 /** Channels that should fail, with the error envelope main would send. */
 const failures = new Map<string, { code: string; message: string; ai?: unknown }>()
+/** Response data per channel (default: ai:run → { id }, everything else → null). */
+const responses = new Map<string, unknown>()
 
 vi.stubGlobal('window', {
   bluely: {
@@ -16,6 +18,7 @@ vi.stubGlobal('window', {
       calls.push({ channel, payload })
       const error = failures.get(channel)
       if (error) return { ok: false, error }
+      if (responses.has(channel)) return { ok: true, data: responses.get(channel) }
       return { ok: true, data: channel === 'ai:run' ? { id: 'x' } : null }
     },
     on: () => () => undefined,
@@ -27,8 +30,10 @@ vi.stubGlobal('window', {
 
 const actions = await import('../../../src/renderer/overlay/actions')
 const { useUi } = await import('../../../src/renderer/overlay/stores/uiStore')
-const { useLive } = await import('../../../src/renderer/overlay/stores/liveStore')
+const { useLive, IDLE_STATE } = await import('../../../src/renderer/overlay/stores/liveStore')
 const { useSettings } = await import('../../../src/renderer/stores/settings')
+const { watchCaptureSettings, retryCapture } =
+  await import('../../../src/renderer/overlay/hooks/useCapture')
 const { createCapture } = await import('../../../src/renderer/overlay/capture')
 const { CaptureController } = await import('../../../src/renderer/audio/captureController')
 
@@ -58,6 +63,7 @@ function failedCard(patch: Partial<AiCard>): AiCard {
 beforeEach(() => {
   calls.length = 0
   failures.clear()
+  responses.clear()
   useUi.setState({
     expanded: true,
     tab: 'insights',
@@ -65,6 +71,7 @@ beforeEach(() => {
     screenForAssist: true,
     screenForQuestions: false,
     notice: null,
+    unseen: 0,
   })
   const s = useSettings.getState().settings
   useSettings.setState({ settings: { ...s, models: { ...s.models, activeTier: 'smart' } } })
@@ -210,5 +217,180 @@ describe('createCapture', () => {
     const capture = createCapture()
     expect(capture).toBeInstanceOf(CaptureController)
     expect(capture.running).toBe(false)
+  })
+})
+
+function liveCard(patch: Partial<AiCard> & Pick<AiCard, 'id' | 'kind'>): AiCard {
+  return failedCard({ status: 'streaming', error: null, sessionId: 's1', ...patch })
+}
+
+function resetLive(status: LiveSessionState['status'] = 'live', sessionId: string | null = 's1') {
+  useLive.setState({ sessionId: null, lines: [], cards: [] })
+  useLive.getState().setState({ ...IDLE_STATE, status, sessionId })
+}
+
+describe('answers arriving from main (global shortcuts run in main)', () => {
+  it('a manual answer opens the collapsed panel on Insights', () => {
+    resetLive()
+    useUi.setState({ expanded: false, tab: 'transcript' })
+    actions.receiveLiveCard(liveCard({ id: 'say-1', kind: 'say' }))
+    expect(useLive.getState().cards.map((c) => c.id)).toEqual(['say-1'])
+    expect(useUi.getState().expanded).toBe(true)
+    expect(useUi.getState().tab).toBe('insights')
+    expect(calls).toContainEqual({ channel: 'overlay:setExpanded', payload: { expanded: true } })
+  })
+
+  it('auto-suggestions never pop the panel open; they show as unseen on the pill', () => {
+    resetLive()
+    useUi.setState({ expanded: false, tab: 'insights' })
+    actions.receiveLiveCard(liveCard({ id: 'auto-1', kind: 'auto' }))
+    actions.receiveLiveCard(liveCard({ id: 'auto-1', kind: 'auto', text: 'more' }))
+    expect(useUi.getState().expanded).toBe(false)
+    expect(useUi.getState().unseen).toBe(1)
+    expect(calls).toEqual([])
+    // Opening the panel on Insights shows them.
+    useUi.getState().setExpanded(true)
+    expect(useUi.getState().unseen).toBe(0)
+  })
+
+  it('updates to a known card, and cards of another session, change nothing', () => {
+    resetLive()
+    actions.receiveLiveCard(liveCard({ id: 'recap-1', kind: 'recap' }))
+    useUi.setState({ expanded: false })
+    calls.length = 0
+    actions.receiveLiveCard(liveCard({ id: 'recap-1', kind: 'recap', status: 'done' }))
+    actions.receiveLiveCard(liveCard({ id: 'other', kind: 'say', sessionId: 's2' }))
+    expect(useUi.getState().expanded).toBe(false)
+    expect(useLive.getState().cards.map((c) => c.id)).toEqual(['recap-1'])
+    expect(calls).toEqual([])
+  })
+})
+
+describe('typed questions keep the draft when they cannot be sent', () => {
+  it('a question over the 4,000 character limit is refused with a notice; the draft stays', async () => {
+    const long = `${'word '.repeat(1000)}summarize this`
+    useUi.getState().setDraft(long)
+    await actions.submitDraft()
+    await actions.sendDraft()
+    expect(runs()).toEqual([])
+    expect(useUi.getState().draft).toBe(long)
+    expect(useUi.getState().notice?.message).toBe(
+      'Your question is too long (5,014 characters). Shorten it to 4,000 or fewer.',
+    )
+  })
+
+  it('a question main refuses comes back into the input', async () => {
+    failures.set('ai:run', { code: 'invalid_payload', message: 'Invalid payload for ai:run' })
+    useUi.getState().setDraft('Summarize this email')
+    const sending = actions.sendDraft()
+    expect(useUi.getState().draft).toBe('') // clears at once
+    await sending
+    expect(useUi.getState().draft).toBe('Summarize this email')
+    expect(useUi.getState().notice).not.toBeNull()
+  })
+
+  it('a restored draft never overwrites what the user typed meanwhile', async () => {
+    failures.set('ai:run', { code: 'server', message: 'down' })
+    useUi.getState().setDraft('first')
+    const sending = actions.sendDraft()
+    useUi.getState().setDraft('second')
+    await sending
+    expect(useUi.getState().draft).toBe('second')
+  })
+
+  it('exactly 4,000 characters is sent', async () => {
+    const q = 'q'.repeat(actions.MAX_QUESTION_CHARS)
+    useUi.getState().setDraft(q)
+    await actions.submitDraft()
+    expect(runs()).toEqual([{ kind: 'ask', question: q, includeScreen: false, tier: 'smart' }])
+    expect(useUi.getState().draft).toBe('')
+  })
+})
+
+describe('meetings deleted in History disappear from the overlay', () => {
+  function seed(status: LiveSessionState['status']) {
+    resetLive(status, status === 'idle' ? null : 's1')
+    useLive.getState().mergeTranscript('s1', [
+      {
+        id: 'l1',
+        sessionId: 's1',
+        channel: 'them',
+        startMs: 0,
+        endMs: 1,
+        text: 'secret',
+        isFinal: true,
+      },
+    ])
+    useLive.getState().upsertCard(liveCard({ id: 'c1', kind: 'say', status: 'done' }))
+  }
+
+  it('Delete all / delete this meeting drops its transcript and answers', async () => {
+    seed('idle')
+    responses.set('sessions:get', { id: 's1', title: 'Renamed' })
+    await actions.forgetIfDeleted('s1') // a rename also says "changed"
+    expect(useLive.getState().lines).toHaveLength(1)
+    await actions.forgetIfDeleted('another-session')
+    expect(calls.filter((c) => c.channel === 'sessions:get')).toHaveLength(1)
+
+    responses.set('sessions:get', null)
+    await actions.forgetIfDeleted(null)
+    expect(calls.at(-1)).toEqual({ channel: 'sessions:get', payload: { id: 's1' } })
+    expect(useLive.getState()).toMatchObject({ sessionId: null, lines: [], cards: [] })
+  })
+
+  it('never drops a session that is still running', async () => {
+    seed('live')
+    responses.set('sessions:get', null)
+    await actions.forgetIfDeleted('s1')
+    expect(useLive.getState().lines).toHaveLength(1)
+    expect(useLive.getState().cards).toHaveLength(1)
+  })
+})
+
+function fakeCapture() {
+  return {
+    running: true,
+    start: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+    update: vi.fn(),
+    setMicDevice: vi.fn(async () => undefined),
+    restartChannel: vi.fn(async () => undefined),
+    subscribe: vi.fn(() => () => undefined),
+  }
+}
+
+describe('audio settings changed during a call reach the running capture', () => {
+  it('VAD changes update capture; a new microphone switches it; other changes do nothing', async () => {
+    const capture = fakeCapture()
+    const stop = watchCaptureSettings(capture)
+    const s = useSettings.getState().settings
+    useSettings.setState({ settings: { ...s, general: { ...s.general, theme: 'light' } } })
+    await flush()
+    expect(capture.update).not.toHaveBeenCalled()
+    expect(capture.setMicDevice).not.toHaveBeenCalled()
+
+    useSettings.setState({
+      settings: { ...s, advanced: { ...s.advanced, vadSensitivity: 0.9, maxSegmentSec: 20 } },
+    })
+    await flush()
+    expect(capture.update).toHaveBeenCalledWith({ sensitivity: 0.9, maxSegmentSec: 20 })
+
+    const now = useSettings.getState().settings
+    useSettings.setState({ settings: { ...now, audio: { ...now.audio, micDeviceId: 'usb' } } })
+    await flush()
+    expect(capture.setMicDevice).toHaveBeenCalledWith('usb')
+    expect(capture.update).toHaveBeenCalledTimes(1)
+
+    stop()
+    useSettings.setState({ settings: { ...now, audio: { ...now.audio, micDeviceId: 'x' } } })
+    await flush()
+    expect(capture.setMicDevice).toHaveBeenCalledTimes(1)
+  })
+
+  it('Retry re-opens the failed channel', async () => {
+    const capture = fakeCapture()
+    retryCapture('me', capture)
+    await flush()
+    expect(capture.restartChannel).toHaveBeenCalledWith('me')
   })
 })

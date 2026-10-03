@@ -2,7 +2,7 @@
  * Seam between the overlay UI and audio capture. The overlay only talks to capture through
  * `CaptureLike`; the implementation is the audio pipeline's CaptureController.
  */
-import type { ChannelState } from '@shared/types'
+import type { Channel, ChannelState } from '@shared/types'
 import { CaptureController } from '../audio/captureController'
 
 export interface ChannelLevel {
@@ -30,6 +30,12 @@ export interface CaptureLike {
   start(opts: CaptureStartOptions): Promise<void>
   /** Flushes pending audio and tells main via 'audio:stopped'. */
   stop(): Promise<void>
+  /** Applies new VAD settings to the running capture (no-op when not running). */
+  update(opts: Partial<Pick<CaptureStartOptions, 'sensitivity' | 'maxSegmentSec'>>): void
+  /** Switches the microphone mid-session; only Me restarts (no-op when unchanged). */
+  setMicDevice(micDeviceId: string | null): Promise<void>
+  /** Re-opens one channel now (Retry after a capture failure). */
+  restartChannel(channel: Channel): Promise<void>
   /** Level updates for the pill's Me/Them indicator. Returns an unsubscribe function. */
   subscribe(cb: (levels: CaptureLevels) => void): () => void
 }

@@ -10,7 +10,7 @@
  *   await capture.stop() // flushes trailing speech, awaits uploads, then 'audio:stopped'
  */
 import type { InvokeRequest } from '@shared/ipc'
-import type { Channel, ChannelState } from '@shared/types'
+import type { Channel, ChannelErrorCode, ChannelState } from '@shared/types'
 import { invoke } from '@renderer/lib/ipc'
 import {
   ChannelPipeline,
@@ -74,9 +74,15 @@ export interface CaptureControllerDeps {
   stopTimeoutMs: number
   /**
    * Delay before re-opening a channel whose device disappeared mid-session (mic unplugged,
-   * loopback ended when the output device changed).
+   * loopback ended when the output device changed), and before re-opening a failed mic after
+   * the audio devices changed.
    */
   recoveryDelayMs: number
+  /**
+   * Calls `onChange` whenever audio devices are added or removed (navigator.mediaDevices
+   * 'devicechange'). Returns an unsubscribe.
+   */
+  watchDevices(onChange: () => void): () => void
 }
 
 /** Snapshots are published at most this often (~15 Hz). */
@@ -88,6 +94,35 @@ const MAX_RECOVERIES = 3
 /** Contract limits for 'audio:segment' (see src/shared/ipc.ts). */
 const MAX_WAV_BYTES = 4 * 1024 * 1024
 const MAX_STATUS_ERROR_CHARS = 500
+
+/** Every session warning this controller raises (main keeps them until told otherwise). */
+const CAPTURE_WARNINGS: readonly CaptureWarningCode[] = [
+  'mic_not_found',
+  'mic_denied',
+  'loopback_unavailable',
+  'no_system_audio',
+  'mic_muted',
+]
+
+/** The warnings that say why a channel failed. */
+const FAILURE_WARNINGS: Record<Channel, readonly CaptureWarningCode[]> = {
+  me: ['mic_not_found', 'mic_denied'],
+  them: ['loopback_unavailable'],
+}
+
+/**
+ * The warning for a failed channel, chosen by the error's code. null means no specific
+ * warning fits (e.g. voice detection failed to load, device busy): the overlay then shows a
+ * generic "capture failed" row from the channel status instead of blaming a missing device.
+ */
+export function failureWarning(
+  channel: Channel,
+  code: ChannelErrorCode | null | undefined,
+): CaptureWarningCode | null {
+  if (channel === 'them') return code === 'loopback_unavailable' ? 'loopback_unavailable' : null
+  if (code === 'mic_not_found' || code === 'mic_denied') return code
+  return null
+}
 
 function logToConsole(level: PipelineLogLevel, message: string): void {
   if (level === 'error') console.error(`[audio] ${message}`)
@@ -109,6 +144,14 @@ export const ipcCaptureSink: CaptureSink = {
   },
 }
 
+/** Production device watcher: navigator.mediaDevices 'devicechange' (absent in Node tests). */
+function watchMediaDevices(onChange: () => void): () => void {
+  const devices = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
+  if (!devices?.addEventListener) return () => undefined
+  devices.addEventListener('devicechange', onChange)
+  return () => devices.removeEventListener('devicechange', onChange)
+}
+
 function defaultDeps(): CaptureControllerDeps {
   return {
     sink: ipcCaptureSink,
@@ -119,6 +162,7 @@ function defaultDeps(): CaptureControllerDeps {
     micFallbackToDefault: true,
     stopTimeoutMs: 15_000,
     recoveryDelayMs: 1500,
+    watchDevices: watchMediaDevices,
   }
 }
 
@@ -170,6 +214,10 @@ export class CaptureController {
   }
   /** In-flight channel re-opens; stop() waits for them. */
   private readonly recovering = new Set<Promise<void>>()
+  /** Channel re-opens run one at a time (a device switch must not race a recovery). */
+  private reopenChain: Promise<void> = Promise.resolve()
+  private unwatchDevices: (() => void) | null = null
+  private deviceTimer: ReturnType<typeof setTimeout> | null = null
   /** Every IPC call still in flight (segments, statuses, warnings); stop() awaits them. */
   private readonly pending = new Set<Promise<unknown>>()
   private readonly subscribers = new Set<(s: CaptureSnapshot) => void>()
@@ -206,12 +254,23 @@ export class CaptureController {
     }
     this.session = session
     this.warnings.clear()
+    // A previous renderer (the overlay was reloaded or re-created mid-call) may have left
+    // capture warnings set in main, and this controller cannot know which: clear them all
+    // once, so e.g. "Your microphone is muted" never sticks after the user unmuted.
+    for (const code of CAPTURE_WARNINGS) {
+      this.track(
+        this.deps.sink.warning({ sessionId: session.id, code, active: false }),
+        'audio:warning',
+      )
+    }
     this.detector.stop()
     this.micSilence.reset()
     this.micTrackMuted = false
     this.recoveries.me = 0
     this.recoveries.them = 0
     for (const channel of CHANNELS) this.resetChannel(channel)
+    this.unwatchDevices?.()
+    this.unwatchDevices = this.deps.watchDevices(() => this.onDevicesChanged(session))
     const run = Promise.allSettled(CHANNELS.map((c) => this.startChannel(session, c))).then(
       () => undefined,
     )
@@ -253,6 +312,33 @@ export class CaptureController {
       pipeline?.setSensitivity(session.opts.sensitivity)
       pipeline?.setMaxSegmentMs(session.opts.maxSegmentSec * 1000)
     }
+  }
+
+  /**
+   * Switches the microphone mid-session (Settings › General › Audio): only the Me channel
+   * restarts, and the speech it already heard is flushed first. Falls back to the default
+   * mic when the chosen one is missing, like start(). No-op when the device did not change.
+   */
+  async setMicDevice(micDeviceId: string | null): Promise<void> {
+    const session = this.session
+    if (!session || this.stopPromise) return
+    const next = micDeviceId || null
+    if (next === session.opts.micDeviceId) return
+    session.opts.micDeviceId = next
+    this.deps.sink.log('info', 'Microphone changed in settings; switching mid-session')
+    this.recoveries.me = 0
+    await this.reopen(session, 'me', { device: 'preferred', onlyIfFailed: false })
+  }
+
+  /**
+   * Re-opens one channel now with the configured device (the overlay's Retry, e.g. after the
+   * user allowed microphone access in Windows privacy settings).
+   */
+  async restartChannel(channel: Channel): Promise<void> {
+    const session = this.session
+    if (!session || this.stopPromise) return
+    this.recoveries[channel] = 0
+    await this.reopen(session, channel, { device: 'preferred', onlyIfFailed: false })
   }
 
   /**
@@ -324,21 +410,68 @@ export class CaptureController {
     this.recoveryTimers[channel] = setTimeout(() => {
       this.recoveryTimers[channel] = null
       if (this.session !== session || this.stopPromise) return
-      const rt = this.channels[channel]
-      if (rt.state !== 'error') return
+      if (this.channels[channel].state !== 'error') return
       this.deps.sink.log('warn', `${channel} capture lost; re-opening it`)
-      const failed = rt.pipeline
-      rt.pipeline = null // ignore the failed pipeline's 'off'
-      const run = (async () => {
-        await failed?.stop({ flush: false }).catch(() => undefined)
-        if (this.session !== session || this.stopPromise) return
+      void this.reopen(session, channel, { device: 'default', onlyIfFailed: true })
+    }, this.deps.recoveryDelayMs)
+  }
+
+  /**
+   * Audio devices changed (a mic plugged in, a headset reconnected): a microphone that is
+   * failing gets another try with the configured device, so "No microphone found" clears
+   * without stopping the call. Windows fires several events while a device settles, so this
+   * waits a moment and re-opens once.
+   */
+  private onDevicesChanged(session: ActiveSession): void {
+    if (this.session !== session || this.stopPromise) return
+    if (this.channels.me.state !== 'error') return
+    if (this.deviceTimer) clearTimeout(this.deviceTimer)
+    this.deviceTimer = setTimeout(() => {
+      this.deviceTimer = null
+      if (this.session !== session || this.stopPromise) return
+      if (this.channels.me.state !== 'error') return
+      this.deps.sink.log('info', 'Audio devices changed; re-opening the microphone')
+      void this.reopen(session, 'me', { device: 'preferred', onlyIfFailed: true })
+    }, this.deps.recoveryDelayMs)
+  }
+
+  /**
+   * Replaces a channel's pipeline: stops the current one (flushing its speech if it was
+   * listening) and starts a new one. `device: 'default'` opens the system default mic (a
+   * lost device is probably still gone); 'preferred' tries the configured mic first and falls
+   * back like start(). Re-opens run one at a time, and stop() waits for them.
+   */
+  private reopen(
+    session: ActiveSession,
+    channel: Channel,
+    how: { device: 'default' | 'preferred'; onlyIfFailed: boolean },
+  ): Promise<void> {
+    const task = async () => {
+      if (this.startPromise) await this.startPromise.catch(() => undefined)
+      if (this.session !== session || this.stopPromise) return
+      const rt = this.channels[channel]
+      if (how.onlyIfFailed && rt.state !== 'error') return
+      const timer = this.recoveryTimers[channel]
+      if (timer) clearTimeout(timer)
+      this.recoveryTimers[channel] = null
+      const previous = rt.pipeline
+      const flush = rt.state === 'listening'
+      rt.pipeline = null // ignore the replaced pipeline's remaining callbacks ('off')
+      await previous?.stop({ flush }).catch(() => undefined)
+      if (this.session !== session || this.stopPromise) return
+      if (how.device === 'default') {
         await this.createPipeline(session, channel, null)
           .start()
           .catch(() => undefined) // reported via onStatus
-      })()
-      this.recovering.add(run)
-      void run.finally(() => this.recovering.delete(run))
-    }, this.deps.recoveryDelayMs)
+      } else {
+        await this.startChannel(session, channel)
+      }
+    }
+    const run = this.reopenChain.then(task)
+    this.reopenChain = run.catch(() => undefined)
+    this.recovering.add(run)
+    void run.catch(() => undefined).finally(() => this.recovering.delete(run))
+    return run
   }
 
   private createPipeline(
@@ -395,18 +528,33 @@ export class CaptureController {
       rt.peakRms = 0
       rt.lastRms = 0
     }
-    this.track(
-      this.deps.sink.channelStatus({
-        sessionId: session.id,
-        channel,
-        state,
-        error: error ? error.message.slice(0, MAX_STATUS_ERROR_CHARS) : null,
-      }),
-      'audio:channelStatus',
-    )
-    const warning: CaptureWarningCode = channel === 'me' ? 'mic_not_found' : 'loopback_unavailable'
-    if (state === 'error') this.setWarning(session, warning, true)
-    else if (state === 'listening') this.setWarning(session, warning, false)
+    const sendStatus = () =>
+      this.track(
+        this.deps.sink.channelStatus({
+          sessionId: session.id,
+          channel,
+          state,
+          error: error ? error.message.slice(0, MAX_STATUS_ERROR_CHARS) : null,
+          code: error?.code ?? null,
+        }),
+        'audio:channelStatus',
+      )
+    if (state === 'error') {
+      // The specific warning (mic denied / not found…) is raised before the error status and
+      // the previous one is cleared after it, so the overlay never flashes its generic
+      // "capture failed" row in between.
+      const failure = failureWarning(channel, error?.code)
+      if (failure) this.setWarning(session, failure, true)
+      for (const code of FAILURE_WARNINGS[channel]) {
+        if (code !== failure) this.setWarning(session, code, false)
+      }
+      sendStatus()
+    } else {
+      sendStatus()
+      if (state === 'listening') {
+        for (const code of FAILURE_WARNINGS[channel]) this.setWarning(session, code, false)
+      }
+    }
     if (channel === 'them') {
       if (state === 'listening') this.detector.start(this.deps.now())
       else this.detector.stop()
@@ -510,6 +658,10 @@ export class CaptureController {
   // ── stop ──────────────────────────────────────────────────────────────────
 
   private async doStop(session: ActiveSession): Promise<void> {
+    this.unwatchDevices?.()
+    this.unwatchDevices = null
+    if (this.deviceTimer) clearTimeout(this.deviceTimer)
+    this.deviceTimer = null
     if (this.startPromise) await this.startPromise.catch(() => undefined)
     for (const channel of CHANNELS) {
       const timer = this.recoveryTimers[channel]

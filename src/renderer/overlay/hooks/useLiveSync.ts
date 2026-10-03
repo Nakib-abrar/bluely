@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { invoke, on } from '../../lib/ipc'
+import { forgetIfDeleted, receiveLiveCard } from '../actions'
 import { useLive } from '../stores/liveStore'
 import { useUi } from '../stores/uiStore'
 
@@ -11,7 +12,8 @@ function logWarn(message: string) {
 
 /**
  * Keeps the live store in sync with main: initial state on mount, then session, transcript,
- * card and latency events. Loads the transcript and cards whenever a new session appears.
+ * card and latency events. Loads the transcript and cards whenever a new session appears,
+ * and drops them when that meeting is deleted from History.
  */
 export function useLiveSync(): void {
   useEffect(() => {
@@ -26,12 +28,7 @@ export function useLiveSync(): void {
       }),
       on('transcript:line', (l) => live.upsertLine(l)),
       on('transcript:remove', (p) => live.removeLine(p.id, p.sessionId)),
-      on('ai:card', (c) => {
-        if (c.scope !== 'live') return
-        const isNew = !useLive.getState().cards.some((x) => x.id === c.id)
-        live.upsertCard(c)
-        if (isNew) ui.noteNewCard()
-      }),
+      on('ai:card', (c) => receiveLiveCard(c)),
       on('ai:delta', (p) => live.appendDelta(p.id, p.delta)),
       on('ai:done', (p) => live.finishCard(p.id, p.text, p.stats)),
       on('ai:error', (p) => live.failCard(p.id, p.error)),
@@ -42,6 +39,7 @@ export function useLiveSync(): void {
       }),
       on('dev:latency', (trace) => live.addTrace(trace)),
       on('overlay:visibility', (v) => ui.setExpanded(v.expanded)),
+      on('sessions:changed', (p) => void forgetIfDeleted(p.id)),
     ]
     invoke('session:getState')
       .then((s) => {

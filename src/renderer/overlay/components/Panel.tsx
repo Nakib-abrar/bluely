@@ -57,7 +57,8 @@ export function Panel({
       <TabsRoot
         value={tab}
         onValueChange={(v) => selectTab(v as OverlayTab)}
-        className="flex min-h-0 flex-1 flex-col"
+        // overflow-hidden: nothing in the upper part may ever paint over the input below.
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
       >
         <header className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-1.5">
           <IconButton

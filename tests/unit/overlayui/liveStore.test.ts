@@ -1,9 +1,16 @@
-import { describe, expect, it } from 'vitest'
-import type { AiCard, LatencyTrace, SpeedStats, TranscriptLine } from '@shared/types'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {
+  AiCard,
+  LatencyTrace,
+  SessionWarningCode,
+  SpeedStats,
+  TranscriptLine,
+} from '@shared/types'
 import {
   createLiveStore,
   IDLE_STATE,
   MAX_TRACES,
+  WARNING_MIN_VISIBLE_MS,
 } from '../../../src/renderer/overlay/stores/liveStore'
 
 /** A scheduler the test flushes by hand (stands in for requestAnimationFrame). */
@@ -243,5 +250,55 @@ describe('liveStore: latency traces', () => {
     store.getState().addTrace(trace('t5', 999))
     expect(store.getState().traces.find((t) => t.id === 't5')?.firstTokenAt).toBe(999)
     expect(store.getState().traces).toHaveLength(MAX_TRACES)
+  })
+})
+
+describe('liveStore: flapping warnings', () => {
+  const live = (store: ReturnType<typeof liveStore>['store'], warnings: SessionWarningCode[]) =>
+    store.getState().setState({ ...IDLE_STATE, status: 'live', sessionId: 's1', warnings })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps "Transcription error (retrying)" up for a minimum time instead of flapping', () => {
+    vi.useFakeTimers()
+    const { store } = liveStore()
+    live(store, ['stt_error_retrying', 'mic_muted'])
+    expect(store.getState().shownWarnings).toEqual(['stt_error_retrying', 'mic_muted'])
+    vi.advanceTimersByTime(1000)
+    // The next segment succeeded: main clears it; a few seconds later it fails again.
+    live(store, ['mic_muted'])
+    expect(store.getState().shownWarnings).toEqual(['mic_muted', 'stt_error_retrying'])
+    vi.advanceTimersByTime(2000)
+    live(store, ['mic_muted', 'stt_error_retrying'])
+    vi.advanceTimersByTime(1500)
+    live(store, ['mic_muted'])
+    expect(store.getState().shownWarnings).toContain('stt_error_retrying')
+    // Once its minimum time is up it goes away by itself.
+    vi.advanceTimersByTime(WARNING_MIN_VISIBLE_MS.stt_error_retrying ?? 0)
+    expect(store.getState().shownWarnings).toEqual(['mic_muted'])
+  })
+
+  it('other warnings follow main immediately', () => {
+    const { store } = liveStore()
+    live(store, ['mic_muted'])
+    live(store, [])
+    expect(store.getState().shownWarnings).toEqual([])
+  })
+})
+
+describe('liveStore: forget a deleted meeting', () => {
+  it('drops the kept transcript and cards once the session is over', () => {
+    const { store } = liveStore()
+    store.getState().upsertLine(line('l1', 1))
+    store.getState().upsertCard(card('a', 1))
+    store.getState().forget('s1') // still live: kept
+    expect(store.getState().lines).toHaveLength(1)
+    store.getState().setState({ ...IDLE_STATE })
+    store.getState().forget('other')
+    expect(store.getState().cards).toHaveLength(1)
+    store.getState().forget('s1')
+    expect(store.getState()).toMatchObject({ sessionId: null, lines: [], cards: [] })
   })
 })

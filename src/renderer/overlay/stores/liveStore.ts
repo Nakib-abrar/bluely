@@ -5,6 +5,7 @@ import type {
   AiErrorInfo,
   LatencyTrace,
   LiveSessionState,
+  SessionWarningCode,
   SpeedStats,
   TranscriptLine,
 } from '@shared/types'
@@ -12,6 +13,15 @@ import { nextFrame, type FrameScheduler } from '../lib/frame'
 
 /** How many dev latency traces the overlay keeps. */
 export const MAX_TRACES = 10
+
+/**
+ * Warnings main sets on every failure and clears on the next success. Once shown they stay
+ * up at least this long, so intermittent errors don't make the panel jump (and screen
+ * readers re-announce the row) every few seconds.
+ */
+export const WARNING_MIN_VISIBLE_MS: Partial<Record<SessionWarningCode, number>> = {
+  stt_error_retrying: 5000,
+}
 
 export const IDLE_STATE: LiveSessionState = {
   status: 'idle',
@@ -35,8 +45,15 @@ export interface LiveStore {
   cards: AiCard[]
   /** Newest last, at most MAX_TRACES. */
   traces: LatencyTrace[]
+  /** Warnings to show: main's active ones plus flapping ones inside their minimum time. */
+  shownWarnings: SessionWarningCode[]
 
   setState(state: LiveSessionState): void
+  /**
+   * Drops the transcript and cards kept for `sessionId` (the meeting was deleted), unless
+   * that session is still running.
+   */
+  forget(sessionId: string): void
   mergeTranscript(sessionId: string, lines: TranscriptLine[]): void
   upsertLine(line: TranscriptLine): void
   removeLine(id: string, sessionId: string): void
@@ -77,6 +94,12 @@ function patchCard(cards: AiCard[], id: string, patch: (c: AiCard) => AiCard): A
 const lineKey = (l: TranscriptLine) => l.startMs
 const cardKey = (c: AiCard) => c.createdAt
 
+const sameCodes = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i])
+
+/** Statuses during which the session's transcript is still being written. */
+const RUNNING: ReadonlySet<LiveSessionState['status']> = new Set(['starting', 'live', 'stopping'])
+
 /**
  * Creates the live-session store. The scheduler is injectable so unit tests can flush
  * streamed deltas deterministically.
@@ -85,12 +108,45 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
   /** Streamed text not yet applied to the cards, by card id. */
   const pending = new Map<string, string>()
   let scheduled = false
+  /** When each held warning (WARNING_MIN_VISIBLE_MS) became visible. */
+  const shownSince = new Map<SessionWarningCode, number>()
+  let holdTimer: ReturnType<typeof setTimeout> | null = null
 
   return create<LiveStore>((set, get) => {
+    /** Recomputes shownWarnings; re-runs itself when a held warning's time is up. */
+    const refreshWarnings = () => {
+      if (holdTimer) clearTimeout(holdTimer)
+      holdTimer = null
+      const active = get().state.warnings
+      const shown = [...active]
+      const now = Date.now()
+      let wakeIn = Number.POSITIVE_INFINITY
+      for (const [code, minMs] of Object.entries(WARNING_MIN_VISIBLE_MS) as [
+        SessionWarningCode,
+        number,
+      ][]) {
+        if (active.includes(code)) {
+          if (!shownSince.has(code)) shownSince.set(code, now)
+          continue
+        }
+        const since = shownSince.get(code)
+        if (since == null) continue
+        const left = since + minMs - now
+        if (left > 0) {
+          shown.push(code)
+          wakeIn = Math.min(wakeIn, left)
+        } else {
+          shownSince.delete(code)
+        }
+      }
+      if (wakeIn !== Number.POSITIVE_INFINITY) holdTimer = setTimeout(refreshWarnings, wakeIn)
+      if (!sameCodes(shown, get().shownWarnings)) set({ shownWarnings: shown })
+    }
     /** Adopts a new session: transcript and cards from the previous one are dropped. */
     const adopt = (sessionId: string) => {
       if (get().sessionId === sessionId) return
       pending.clear()
+      shownSince.clear()
       set({ sessionId, lines: [], cards: [] })
     }
     /** Live cards belong to the current session (or to none when main does not say). */
@@ -105,10 +161,20 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
       lines: [],
       cards: [],
       traces: [],
+      shownWarnings: [],
 
       setState(state) {
         if (state.sessionId) adopt(state.sessionId)
         set({ state })
+        refreshWarnings()
+      },
+
+      forget(sessionId) {
+        if (get().sessionId !== sessionId) return
+        const { state } = get()
+        if (state.sessionId === sessionId && RUNNING.has(state.status)) return
+        pending.clear()
+        set({ sessionId: null, lines: [], cards: [] })
       },
 
       mergeTranscript(sessionId, lines) {

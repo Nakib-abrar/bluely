@@ -4,7 +4,7 @@ import { t } from '@shared/i18n'
 import { keybindDisplay } from '@shared/keybinds'
 import { cn, Keys, Tooltip } from '../../components/ui'
 import { useSettings } from '../../stores/settings'
-import { askQuestion, submitDraft } from '../actions'
+import { sendDraft, submitDraft } from '../actions'
 import { useUi } from '../stores/uiStore'
 import { OverlayMenu } from './OverlayMenu'
 
@@ -101,11 +101,7 @@ export function AskInput() {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (e.nativeEvent.isComposing) return
       e.preventDefault()
-      if (hasText) {
-        const question = draft
-        useUi.getState().setDraft('')
-        void askQuestion(question)
-      }
+      if (hasText) void sendDraft()
     }
   }
 

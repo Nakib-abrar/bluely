@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { OVERLAY } from '@shared/constants'
 import { Pill } from './components/Pill'
 import { Panel } from './components/Panel'
+import { Warnings } from './components/Warnings'
 import { getCapture, useCaptureLifecycle, useSpeakingSignal } from './hooks/useCapture'
 import { useLiveSync } from './hooks/useLiveSync'
 import { useOverlayKeys } from './hooks/useOverlayKeys'
@@ -64,7 +65,11 @@ export function App() {
       <Pill capture={capture} />
       {panel.mounted ? (
         <Panel height={height} closing={panel.closing} onExited={panel.onExited} />
-      ) : null}
+      ) : (
+        // Collapsed: the consent reminder and session problems still show, in a compact
+        // card under the pill (the window fits it via useWindowFit).
+        <Warnings variant="strip" />
+      )}
     </div>
   )
 }

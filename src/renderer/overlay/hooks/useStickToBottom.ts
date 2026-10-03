@@ -58,6 +58,9 @@ export function useStickToBottom(tab: OverlayTab) {
       if (e.deltaY < 0) unstick()
     }
     const follow = () => {
+      // The inactive tab is display:none: its 0-size box would look "at the bottom" and
+      // re-stick, losing the user's read-back position when they switch back.
+      if (el.clientHeight === 0) return
       if (stick.current) {
         // Instant, not smooth: streaming grows the content every frame.
         el.scrollTop = el.scrollHeight

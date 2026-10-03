@@ -30,14 +30,23 @@ function statusLabel(status: LiveStatus): string | null {
   return null
 }
 
-/** Live dot + elapsed timer + Me/Them meters. */
+/**
+ * Live dot + elapsed timer + Me/Them meters. When neither channel can capture, the dot turns
+ * red and says so instead of an endless "Starting…" (the warnings explain why).
+ */
 function SessionStatus({ capture }: { capture: CaptureLike }) {
   const status = useLive((s) => s.state.status)
   const startedAt = useLive((s) => s.state.startedAt)
   const audio = useLive((s) => s.state.audio)
+  const running = status === 'starting' || status === 'live'
+  const noAudio = running && audio.me.state === 'error' && audio.them.state === 'error'
   const elapsed = useElapsed(startedAt, status === 'live')
-  const live = status === 'live'
-  const label = live ? t('overlay.pill.listening') : statusLabel(status)
+  const live = status === 'live' && !noAudio
+  const label = noAudio
+    ? t('overlay.pill.noAudio')
+    : live
+      ? t('overlay.pill.listening')
+      : statusLabel(status)
   return (
     <div className="flex h-8 items-center gap-2.5 rounded-full px-2.5">
       {/* Announce status changes only; the ticking timer stays out of the live region. */}
@@ -50,11 +59,12 @@ function SessionStatus({ capture }: { capture: CaptureLike }) {
       >
         <span
           aria-hidden
-          data-status={status}
+          data-status={noAudio ? 'no-audio' : status}
           className={cn(
             'h-2 w-2 rounded-full',
+            noAudio && 'bg-danger',
             live && 'animate-pulse-dot bg-success',
-            (status === 'starting' || status === 'stopping') && 'bg-warning',
+            !noAudio && (status === 'starting' || status === 'stopping') && 'bg-warning',
             status === 'processing' && 'bg-accent-2',
           )}
         />
@@ -63,7 +73,10 @@ function SessionStatus({ capture }: { capture: CaptureLike }) {
             {formatElapsed(elapsed ?? 0)}
           </span>
         ) : (
-          <span aria-hidden className="text-[12.5px] font-medium text-muted">
+          <span
+            aria-hidden
+            className={cn('text-[12.5px] font-medium', noAudio ? 'text-danger' : 'text-muted')}
+          >
             {label}
           </span>
         )}
@@ -82,26 +95,43 @@ function SessionStatus({ capture }: { capture: CaptureLike }) {
 export function Pill({ capture }: { capture: CaptureLike }) {
   const status = useLive((s) => s.state.status)
   const expanded = useUi((s) => s.expanded)
+  const unseen = useUi((s) => s.unseen)
   const hideHidesWidget = useSettings((s) => s.settings.general.hideHidesWidget)
   const inSession = status !== 'idle'
   const canStop = status === 'live' || status === 'starting'
   // "Hide" collapses the panel (or hides the widget, per settings); once collapsed it reads "Show".
   const showsExpand = !expanded && !hideHidesWidget
+  // Auto-suggestions that arrived while collapsed: a badge on the logo, which opens them.
+  const badge = !expanded && unseen > 0 ? unseen : 0
+  const logoLabel = expanded
+    ? t('overlay.pill.hidePanel')
+    : badge
+      ? `${t('overlay.pill.showPanel')} · ${t('overlay.panel.newAnswers', { count: badge })}`
+      : t('overlay.pill.showPanel')
 
   return (
     <div
       data-hit
       className="drag flex h-11 shrink-0 items-center gap-1 rounded-full border border-ov-line bg-ov-pill px-1.5 shadow-panel"
     >
-      <PillTip content={expanded ? t('overlay.pill.hidePanel') : t('overlay.pill.showPanel')}>
+      <PillTip content={logoLabel}>
         <button
           type="button"
-          aria-label={expanded ? t('overlay.pill.hidePanel') : t('overlay.pill.showPanel')}
+          aria-label={logoLabel}
           aria-expanded={expanded}
           onClick={() => void setExpanded(!expanded)}
-          className={cn(pillButton, 'w-8 hover:bg-panel-3 active:scale-95')}
+          className={cn(pillButton, 'relative w-8 hover:bg-panel-3 active:scale-95')}
         >
           <LogoMark size={22} title="" />
+          {badge ? (
+            <span
+              aria-hidden
+              data-unseen={badge}
+              className="absolute -top-0.5 -right-0.5 inline-flex h-4 min-w-4 animate-fade-in items-center justify-center rounded-full bg-accent px-1 text-[10px] leading-none font-semibold text-white"
+            >
+              {badge}
+            </span>
+          ) : null}
         </button>
       </PillTip>
 

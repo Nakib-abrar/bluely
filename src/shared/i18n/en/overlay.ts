@@ -14,6 +14,7 @@ export const overlay = {
     stopping: 'Stopping…',
     processing: 'Writing notes…',
     listening: 'Listening',
+    noAudio: 'No audio',
     elapsed: 'Time in this session',
     activity: 'Audio activity: Me (microphone) and Them (system audio)',
     channelListening: '{who}: listening',
@@ -77,12 +78,17 @@ export const overlay = {
     mic_not_found: 'No microphone found. Check your audio settings.',
     mic_denied:
       'Bluely is not allowed to use the microphone. Allow it in Windows privacy settings.',
+    mic_failed: 'Couldn’t start the microphone.',
     loopback_unavailable: 'Can’t capture system audio here. Only your microphone is transcribed.',
+    system_audio_failed: 'Couldn’t capture system audio.',
     stt_error_retrying: 'Transcription error (retrying)…',
     use_headphones: 'Tip: use headphones for the cleanest transcript.',
     no_key: 'Add your OpenRouter key to get suggestions.',
+    label: 'Session alerts',
     addKey: 'Add key',
+    audioSettings: 'Audio settings',
     openSettings: 'Settings',
+    retry: 'Retry',
     dismiss: 'Dismiss',
   },
   consent: {
@@ -94,6 +100,7 @@ export const overlay = {
   notice: {
     unavailable: 'That isn’t available yet.',
     failed: 'Something went wrong. Try again.',
+    tooLong: 'Your question is too long ({count} characters). Shorten it to {max} or fewer.',
   },
   dev: {
     title: 'Latency',

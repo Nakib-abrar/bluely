@@ -341,9 +341,17 @@ test.describe('PulseAudio loopback', () => {
     test.info().annotations.push({ type: 'perf', description: `idle ${JSON.stringify(metrics)}` })
     expect(result.allSegments).toHaveLength(0)
     // The null-source "mic" delivers exact zeros: after 5 s that reads as a muted mic, and
-    // stop() clears the warning again.
+    // stop() clears the warning again. start() first clears every capture warning a previous
+    // renderer may have left set in main.
     console.log('[audio e2e] idle warnings:', JSON.stringify(result.warnings))
     expect(result.warnings).toEqual([
+      ...[
+        'mic_not_found',
+        'mic_denied',
+        'loopback_unavailable',
+        'no_system_audio',
+        'mic_muted',
+      ].map((code) => ({ code, active: false })),
       { code: 'mic_muted', active: true },
       { code: 'mic_muted', active: false },
     ])
