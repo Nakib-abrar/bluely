@@ -1,7 +1,8 @@
 /**
- * Preview of what a new "Keep sessions" value would delete, so Settings › Privacy can ask before
- * main's retention run removes meetings (it runs as soon as the setting changes, and cannot be
- * undone). Pure apart from the injected session lister (unit-tested in tests/unit/settingsui).
+ * Preview of what a new "Keep sessions" value would delete, so Settings › Privacy & Data can ask
+ * before main's retention run removes meetings (it runs as soon as the setting changes, and
+ * cannot be undone). Pure apart from the injected session lister (unit-tested in
+ * tests/unit/settingsui).
  */
 import type { Settings } from '@shared/settings'
 import type { SessionSummary } from '@shared/types'

@@ -4,10 +4,10 @@ import { SCREENSHOTS_NO_SESSION_DIR } from '@shared/constants'
 import type { Logger } from '../log'
 
 /*
- * Saved Assist screenshots (Settings › Privacy › "Save screenshots", off by default) live in
- * <screenshotsDir>/<sessionId>/<cardId>.jpg, or in <screenshotsDir>/no-session/ when nothing was
- * recording (see saveScreenshot in screen.ts). Nothing in the database points at them, so every
- * path that deletes meetings must delete the matching folders too.
+ * Saved Assist screenshots (Settings › Privacy & Data › "Save screenshots", off by default)
+ * live in <screenshotsDir>/<sessionId>/<cardId>.jpg, or in <screenshotsDir>/no-session/ when
+ * nothing was recording (see saveScreenshot in screen.ts). Nothing in the database points at
+ * them, so every path that deletes meetings must delete the matching folders too.
  */
 
 /** Session ids are UUIDs made in main; anything else never becomes a path (no `..`, `C:`, `/`). */
