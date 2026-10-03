@@ -2,6 +2,7 @@ import { t } from '@shared/i18n'
 import type { Mode, SessionStatus, SessionSummaryJson } from '@shared/types'
 import type { CoreContext } from '../context'
 import { generatePostCall, POST_CALL_PARTS, type PostCallPart } from '../ai/postCall'
+import { formatPartErrors, parsePartErrors, type PartErrors } from '../ai/postCallErrors'
 import { renderActionItemsMarkdown, renderNotesMarkdown } from '../ai/markdown'
 import { formatTranscript } from '../ai/format'
 import { emailToMarkdown } from '../data/export'
@@ -54,7 +55,7 @@ export class PostCallRunner {
       if (parts.length === 0) {
         // Only a resolved email failure was asked for: nothing to generate, just drop its error.
         const errors = mergeErrors(before.summary.postCallError, [], [], ['email'])
-        sessions.updateSummaryJson(sessionId, { postCallError: formatErrors(errors) })
+        sessions.updateSummaryJson(sessionId, { postCallError: formatPartErrors(errors) })
         sessions.setStatus(sessionId, this.finalStatus(sessionId))
         return
       }
@@ -105,7 +106,7 @@ export class PostCallRunner {
       sessions.updateSummaryJson(sessionId, {
         ...(result.notes ? { notes: result.notes } : {}),
         ...(email ? { email, emailEdited: false } : {}),
-        postCallError: formatErrors(errors),
+        postCallError: formatPartErrors(errors),
       })
       // LLM usage for these requests is logged by the models feature (onFinished hook).
       sessions.setStatus(sessionId, this.finalStatus(sessionId))
@@ -176,13 +177,15 @@ function isEmailEdited(summary: SessionSummaryJson): boolean {
  * The email part failed, and the user then wrote the follow-up email themselves (the Email tab is
  * editable while there is none). That failure is resolved: retrying it must not replace what they
  * wrote, even though the failed-parts banner still names 'email', and its error is cleared.
+ * ('sessions:updateEmail' now clears that error when a written email is saved; this still covers
+ * sessions stored before it did.)
  * A generated email the user edited carries no email error (a successful run clears it), so an
  * explicit 'email' still regenerates that one. A blank email (typed, then cleared) is nothing to
  * keep, so its failure is still retried.
  */
 function emailFailureResolved(summary: SessionSummaryJson): boolean {
   const written = !!summary.email && !!(summary.email.subject.trim() || summary.email.body.trim())
-  return written && isEmailEdited(summary) && parseErrors(summary.postCallError).has('email')
+  return written && isEmailEdited(summary) && parsePartErrors(summary.postCallError).has('email')
 }
 
 /** The user saved an email while this run was going. */
@@ -219,36 +222,6 @@ function keepGeneratedEmail(
   return !emailEditedDuringRun(now, before) && ran.includes('email')
 }
 
-type PartErrors = Map<PostCallPart, string>
-
-const PART_ERROR = /^(notes|actions|email): (.+)$/s
-/**
- * Splits only where the next "<part>: " entry starts, so a message that itself contains " · "
- * (e.g. a provider's error detail) stays whole. Same rule as the renderer's parsePostCallError.
- */
-const PART_ERROR_SEPARATOR = / · (?=(?:notes|actions|email): )/
-
-/**
- * Inverse of formatErrors: "notes: msg · email: msg" → per-part messages. Text that is not a
- * per-part entry (a whole-run failure, "nothing was transcribed") is dropped: the run that reads
- * it replaces it.
- */
-function parseErrors(stored: string | null): PartErrors {
-  const out: PartErrors = new Map()
-  for (const entry of (stored ?? '').split(PART_ERROR_SEPARATOR)) {
-    const match = PART_ERROR.exec(entry.trim())
-    if (match) out.set(match[1] as PostCallPart, match[2] as string)
-  }
-  return out
-}
-
-function formatErrors(errors: PartErrors): string | null {
-  const segments = POST_CALL_PARTS.filter((p) => errors.has(p)).map(
-    (p) => `${p}: ${errors.get(p) ?? ''}`,
-  )
-  return segments.length ? segments.join(' · ') : null
-}
-
 /**
  * The parts that ran report their own outcome; earlier errors of parts that did not run this
  * time are kept (they are still missing). `resolved` parts were written by the user, so their
@@ -260,7 +233,7 @@ function mergeErrors(
   failed: readonly { part: PostCallPart; message: string }[],
   resolved: readonly PostCallPart[],
 ): PartErrors {
-  const errors = parseErrors(stored)
+  const errors = parsePartErrors(stored)
   for (const part of ran) errors.delete(part)
   for (const e of failed) errors.set(e.part, e.message)
   for (const part of resolved) errors.delete(part)

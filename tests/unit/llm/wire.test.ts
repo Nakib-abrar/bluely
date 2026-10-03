@@ -13,8 +13,17 @@ import { _resetRegistryForTests, initIpcRegistry } from '@main/ipc/registry'
 import { SettingsStore } from '@main/settings/settingsStore'
 import type { WindowRegistry } from '@main/windows/registry'
 import { routingFor, routingForModel, wireModels, type ModelsFeature } from '@main/models/wire'
+import { INCOMPLETE_STATS_DELAY_MS } from '@main/providers/llm/openrouter'
 import { DEFAULT_SETTINGS } from '@shared/settings'
-import { silentLogger } from './helpers'
+import {
+  deltaChunk,
+  fakeFetch,
+  fakeStream,
+  jsonResponse,
+  META,
+  silentLogger,
+  sseResponse,
+} from './helpers'
 
 type Listener = (event: IpcMainInvokeEvent, payload: unknown) => Promise<IpcEnvelope<unknown>>
 
@@ -42,6 +51,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  vi.useRealTimers()
   await feature?.dispose()
   feature = null
   _resetRegistryForTests()
@@ -198,6 +208,72 @@ describe('wireModels', () => {
     expect(stats).toEqual([
       expect.objectContaining({ model: 'openai/gpt-4o-mini', provider: 'OpenAI', samples: 1 }),
     ])
+  })
+
+  it('logs the cost of a cancelled stream for monthly spend, without a latency sample', async () => {
+    // OpenRouter bills the tokens generated before we hung up; the cost is looked up from
+    // GET /generation a few seconds later (the stream itself never carried its usage).
+    const generation = {
+      id: META.id,
+      model: META.model,
+      provider_name: 'Groq',
+      tokens_prompt: 120,
+      tokens_completion: 40,
+      total_cost: 0.00009,
+    }
+    const body = fakeStream([deltaChunk('Hel')], { hang: true })
+    const fetchImpl = fakeFetch((url) =>
+      url.includes('/generation')
+        ? jsonResponse(200, { data: generation })
+        : sseResponse(body.stream),
+    )
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { ctx } = makeCtx()
+    feature = wireModels(ctx, { startupDelayMs: 60_000, fetchImpl })
+    const ac = new AbortController()
+    const stream = feature.llm
+      .streamChat({
+        model: META.model,
+        messages: [{ role: 'user', content: 'hello' }],
+        tag: 'auto',
+        signal: ac.signal,
+      })
+      [Symbol.asyncIterator]()
+    await stream.next() // meta
+    await stream.next() // 'Hel'
+    const pending = stream.next()
+    ac.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' })
+    expect((await data<{ requests: number }>('usage:getMonthSpend')).requests).toBe(0)
+
+    await vi.advanceTimersByTimeAsync(INCOMPLETE_STATS_DELAY_MS)
+    await vi.waitFor(() =>
+      expect(fetchImpl.calls.map((c) => c.url)).toContain(
+        `${mock.baseUrl}/generation?id=${META.id}`,
+      ),
+    )
+    await vi.waitFor(async () =>
+      expect(await data('usage:getMonthSpend')).toMatchObject({
+        requests: 1,
+        llmUsd: 0.00009,
+        sttUsd: 0,
+      }),
+    )
+    const row = ctx.db
+      .prepare('SELECT kind, model, provider, cost_usd, tokens_in, tokens_out FROM usage_log')
+      .all()
+    expect(row).toEqual([
+      {
+        kind: 'llm',
+        model: META.model,
+        provider: 'Groq',
+        cost_usd: 0.00009,
+        tokens_in: 120,
+        tokens_out: 40,
+      },
+    ])
+    // An unfinished request says nothing about the model's speed.
+    expect(await data('models:getStats')).toEqual([])
   })
 
   it('models:runLatencyTest streams progress events and records each sample once', async () => {

@@ -119,7 +119,6 @@ export class SessionsRepo {
     getSummaryJson: Statement
     setSummaryJson: Statement
     delete: Statement
-    deleteOlderThan: Statement
     findUnfinished: Statement
   }
   private readonly transcript: TranscriptRepo
@@ -162,10 +161,6 @@ export class SessionsRepo {
       getSummaryJson: db.prepare('SELECT summary_json FROM sessions WHERE id = ?'),
       setSummaryJson: db.prepare('UPDATE sessions SET summary_json = ? WHERE id = ?'),
       delete: db.prepare('DELETE FROM sessions WHERE id = ?'),
-      // Never touch the session being recorded right now, even if the clock jumped.
-      deleteOlderThan: db.prepare(
-        "DELETE FROM sessions WHERE started_at < ? AND status <> 'active'",
-      ),
       findUnfinished: db.prepare(
         `SELECT ${SESSION_SUMMARY_COLUMNS} FROM sessions WHERE status IN ('active', 'processing')
          ORDER BY started_at ASC`,
@@ -264,14 +259,14 @@ export class SessionsRepo {
     return tx()
   }
 
-  /** Cascades to transcript lines, AI messages and action items (and their search rows). */
+  /**
+   * Cascades to transcript lines, AI messages and action items (and their search rows). Saved
+   * screenshots live on disk: callers delete them too (deleteSessionScreenshots). There is
+   * deliberately no bulk "delete older than" here; retention goes through applyRetention,
+   * which also removes the screenshots of the meetings it deletes.
+   */
   delete(id: string): boolean {
     return this.stmt.delete.run(id).changes > 0
-  }
-
-  /** Deletes finished sessions that started before `epochMs`. Returns how many were deleted. */
-  deleteOlderThan(epochMs: number): number {
-    return this.stmt.deleteOlderThan.run(epochMs).changes
   }
 
   /** Sessions a crash left 'active' or 'processing', oldest first. */
