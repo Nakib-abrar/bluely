@@ -12,7 +12,7 @@ export interface MainWindowDeps {
   windows: WindowRegistry
   events: EventBus
   isTrusted: (url: string) => boolean
-  /** Decides what the close button does (minimize during a live session, otherwise quit). */
+  /** Decides what the close button does (minimize while a call or its notes run, otherwise quit). */
   onCloseRequested: (win: BrowserWindow) => 'close' | 'minimize'
   startHidden: boolean
 }

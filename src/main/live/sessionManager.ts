@@ -1,7 +1,12 @@
+import { AUDIO } from '@shared/constants'
+import { t } from '@shared/i18n'
 import type {
   Channel,
+  ChannelErrorCode,
   ChannelState,
+  ChannelStatus,
   LiveSessionState,
+  Mode,
   SessionWarningCode,
   TranscriptLine,
 } from '@shared/types'
@@ -14,6 +19,7 @@ import { AutoSuggestScheduler, type AutoTrigger } from '../session/autoSuggestSc
 import { RunningSummarizer } from '../ai/runningSummary'
 import type {
   QueuedTranscriptionResult,
+  TranscriptionErrorInfo,
   TranscriptionJob,
   TranscriptionQueue,
 } from '../providers/stt/transcriptionQueue'
@@ -27,6 +33,20 @@ import type { PostCallRunner } from './postCallRunner'
 
 const AUDIO_STOP_TIMEOUT_MS = 6_000
 const STT_DRAIN_TIMEOUT_MS = 15_000
+/** Quitting during a call: the whole shutdown must fit the 4 s quit budget (index.ts). */
+const SHUTDOWN_AUDIO_WAIT_MS = 1_200
+const SHUTDOWN_DRAIN_MS = 2_000
+/** A channel that has reported neither 'listening' nor an error by then is marked failed. */
+const CAPTURE_START_TIMEOUT_MS = 20_000
+/** Echo de-dup window (± ms around a Them line), shared with the EchoDeduper below. */
+const ECHO_WINDOW_MS = AUDIO.dedupWindowMs
+/** A Me line that may be speaker echo waits at most this long for its Them copy. */
+const ECHO_WAIT_MAX_MS = 4_000
+/** How long "Some speech could not be transcribed" stays after the last lost segment. */
+const STT_LOST_NOTICE_MS = 30_000
+
+/** Post-call outputs that can be regenerated one by one. */
+export type PostCallPart = 'notes' | 'actions' | 'email'
 
 function idleState(modeId: string): LiveSessionState {
   return {
@@ -40,6 +60,13 @@ function idleState(modeId: string): LiveSessionState {
     showConsentReminder: false,
     lastError: null,
   }
+}
+
+const CHANNELS: Channel[] = ['me', 'them']
+
+/** A channel has finished starting (successfully or not). */
+function settled(state: ChannelState): boolean {
+  return state === 'listening' || state === 'error' || state === 'off'
 }
 
 export interface SegmentInput {
@@ -56,6 +83,10 @@ export interface SegmentInput {
  * Owns the live call: session row, transcription queue, transcript assembly + echo de-dup,
  * auto-suggest scheduling, running summary, and the stop → post-call hand-off.
  * Every finalized line is written to SQLite immediately (crash-safe).
+ *
+ * Status flow: idle → starting → live → stopping → processing → idle. 'processing' means the
+ * call is over and its notes are being generated in the background; a new call can start
+ * during it (the notes keep going).
  */
 export class SessionManager implements LiveContextSource {
   private state: LiveSessionState
@@ -65,8 +96,30 @@ export class SessionManager implements LiveContextSource {
   private summarizer: RunningSummarizer | null = null
   private queue: TranscriptionQueue | null = null
   private sttTiming = new Map<string, { vadEndAt: number; sttDoneAt: number }>()
-  private audioStoppedResolver: (() => void) | null = null
+  private audioStoppedWaiters = new Set<() => void>()
   private stopPromise: Promise<void> | null = null
+  /** Post-call generation per session; it outlives the live state. */
+  private postCallJobs = new Map<string, Promise<void>>()
+  /** The most recently started session (its overlay cards live on after it ends). */
+  private lastSession: string | null = null
+  /** 'session:setAutoSuggest' for the current (or next) session; wins over settings and Mode. */
+  private autoSuggestOverride: boolean | null = null
+  private startTimer: ReturnType<typeof setTimeout> | null = null
+  /** Jobs of this session waiting for a speech-to-text retry. */
+  private retrying = new Set<string>()
+  /** What `state.lastError` currently shows, so each kind is cleared by the right event. */
+  private lastErrorKind: 'provider' | 'lost' | null = null
+  private lostSegments = 0
+  private lostTimer: ReturnType<typeof setTimeout> | null = null
+  /** Them segments sent to speech-to-text, session-relative, until their line arrives. */
+  private themInFlight = new Map<string, { startMs: number; endMs: number }>()
+  /** Session-relative ms when the Them channel's VAD reported speech, while it lasts. */
+  private themSpeakingSinceMs: number | null = null
+  /** Kept Me lines that may still be retracted as echo before they may cancel auto-suggest. */
+  private deferredMe = new Map<string, { line: TranscriptLine; deadline: number }>()
+  private deferredMeTimer: ReturnType<typeof setTimeout> | null = null
+  /** The overlay renderer keeps crashing and is not reloaded: nothing of this call is captured. */
+  private captureDead = false
 
   constructor(
     private readonly ctx: CoreContext,
@@ -83,7 +136,9 @@ export class SessionManager implements LiveContextSource {
     this.scheduler = new AutoSuggestScheduler({
       debounceMs: ctx.settings.get().advanced.autoSuggestDebounceMs,
       cooldownMs: ctx.settings.get().advanced.autoSuggestCooldownSec * 1000,
-      isEnabled: () => this.autoSuggestEnabled() && !this.deps.ai.isLiveBusy(),
+      // Only during the call: lines transcribed while stopping must not start a paid request.
+      isEnabled: () =>
+        this.state.status === 'live' && this.autoSuggestEnabled() && !this.deps.ai.isLiveBusy(),
       language: () => {
         const lang = this.ctx.settings.get().language.transcription
         return lang === 'auto' ? undefined : lang
@@ -107,6 +162,8 @@ export class SessionManager implements LiveContextSource {
       if (next.advanced.sttConcurrency !== prev.advanced.sttConcurrency) {
         this.queue?.setConcurrency(next.advanced.sttConcurrency)
       }
+      // Changing the global setting is the newer decision: it replaces the session override.
+      if (next.general.autoSuggest !== prev.general.autoSuggest) this.autoSuggestOverride = null
       if (
         next.general.autoSuggest !== prev.general.autoSuggest ||
         next.activeModeId !== prev.activeModeId
@@ -114,6 +171,7 @@ export class SessionManager implements LiveContextSource {
         this.patch({ autoSuggest: this.autoSuggestEnabled(), modeId: next.activeModeId })
       }
     })
+    ctx.secrets.onChange(() => this.onKeyChanged())
   }
 
   // ── LiveContextSource ─────────────────────────────────────────────────────
@@ -127,7 +185,8 @@ export class SessionManager implements LiveContextSource {
   }
 
   transcript(): TranscriptLine[] {
-    return this.buffer.finals()
+    // Once the call is fully over, live actions must not see (or resend) its transcript.
+    return this.state.sessionId ? this.buffer.finals() : []
   }
 
   runningSummary(): { text: string | null; coveredUntilMs: number } {
@@ -151,15 +210,49 @@ export class SessionManager implements LiveContextSource {
     )
   }
 
+  /**
+   * Audio capture of the current call has stopped for good: the overlay renderer it runs in
+   * keeps crashing. It lasts until capture reports 'listening' again (overlay shown again) or
+   * the call ends. The main window and the tray say so; the overlay is gone.
+   */
+  captureFailed(): boolean {
+    return this.captureDead && this.isLive()
+  }
+
+  /** Notes, action items or the email of an ended call are still being generated. */
+  isPostCallRunning(): boolean {
+    return this.postCallJobs.size > 0
+  }
+
+  /** Resolves once no post-call generation is running (tests, diagnostics). */
+  async whenPostCallIdle(): Promise<void> {
+    while (this.postCallJobs.size > 0) await Promise.allSettled([...this.postCallJobs.values()])
+  }
+
+  /** The most recently started session, live or ended; null after forgetLastSession(). */
+  lastSessionId(): string | null {
+    return this.lastSession
+  }
+
+  /**
+   * The last session was deleted. If its notes are still generating, return to idle now so the
+   * deleted call's transcript is no longer kept for live actions.
+   */
+  forgetLastSession(): void {
+    const id = this.lastSession
+    this.lastSession = null
+    if (id && this.state.status === 'processing' && this.state.sessionId === id) this.goIdle()
+  }
+
   getTranscript(sessionId: string): TranscriptLine[] {
     if (sessionId === this.state.sessionId) return this.buffer.all()
     return this.deps.history.transcript.listBySession(sessionId, { finalOnly: false })
   }
 
+  /** Tray and global shortcut: stop a live call, otherwise start one (also while notes generate). */
   toggle(): void {
     if (this.isLive()) void this.stop()
-    else if (this.state.status === 'idle')
-      this.start().catch((err) => this.ctx.log.error('Start failed', err))
+    else this.start().catch((err) => this.ctx.log.error('Start failed', err))
   }
 
   async start(modeId?: string): Promise<{ sessionId: string }> {
@@ -171,9 +264,19 @@ export class SessionManager implements LiveContextSource {
       this.ctx.settings.update({ activeModeId: modeId })
     const now = Date.now()
     const session = this.deps.history.sessions.create({ modeId: activeModeId, startedAt: now })
+    this.stopPromise = null
+    this.clearSessionTimers()
     this.buffer = new TranscriptBuffer()
-    this.deduper = new EchoDeduper({ windowMs: 3000, threshold: 0.8 })
+    this.deduper = new EchoDeduper({ windowMs: ECHO_WINDOW_MS, threshold: 0.8 })
     this.sttTiming.clear()
+    this.retrying.clear()
+    this.themInFlight.clear()
+    this.themSpeakingSinceMs = null
+    this.deferredMe.clear()
+    this.lostSegments = 0
+    this.lastErrorKind = null
+    this.captureDead = false
+    this.lastSession = session.id
     this.deps.ai.resetLive()
     this.queue = this.deps.stt.createQueue({
       getOptions: () => {
@@ -184,8 +287,10 @@ export class SessionManager implements LiveContextSource {
         }
       },
       concurrencyPerChannel: settings.advanced.sttConcurrency,
+      onReady: (job) => this.onSttReady(job),
       onResult: (job, result) => this.onTranscribed(job, result),
       onError: (job, err, info) => this.onSttError(job, err, info),
+      onDropped: (job) => this.onSegmentGone(job),
     })
     this.summarizer = new RunningSummarizer({
       llm: this.deps.models.llm,
@@ -208,6 +313,11 @@ export class SessionManager implements LiveContextSource {
       autoSuggest: this.autoSuggestEnabled(),
       showConsentReminder: settings.general.consentReminder,
     }
+    this.startTimer = setTimeout(
+      () => this.captureStartTimedOut(session.id),
+      CAPTURE_START_TIMEOUT_MS,
+    )
+    this.startTimer.unref?.()
     this.emit()
     this.ctx.events.broadcast('sessions:changed', { id: session.id })
     this.ctx.overlay.show(false)
@@ -216,35 +326,31 @@ export class SessionManager implements LiveContextSource {
     return { sessionId: session.id }
   }
 
-  /** Stop → flush audio → drain STT → post-call notes. Safe to call repeatedly. */
+  /**
+   * Stop → flush audio → drain STT → status 'processing'. Resolves there: the notes are
+   * generated in the background (isPostCallRunning) and the status returns to idle when they
+   * are done, unless a new call has started meanwhile. Safe to call repeatedly.
+   */
   stop(): Promise<void> {
     if (!this.isLive() || !this.state.sessionId) return Promise.resolve()
     if (this.stopPromise) return this.stopPromise
-    this.stopPromise = this.doStop().finally(() => {
-      this.stopPromise = null
+    const promise: Promise<void> = this.doStop().finally(() => {
+      if (this.stopPromise === promise) this.stopPromise = null
     })
-    return this.stopPromise
+    this.stopPromise = promise
+    return promise
   }
 
   private async doStop(): Promise<void> {
     const sessionId = this.state.sessionId as string
     const modeId = this.state.modeId
+    this.clearStartTimer()
     this.patch({ status: 'stopping' })
     this.scheduler.notifyManualRequest()
     this.scheduler.setThemSpeaking(false)
+    this.themSpeakingSinceMs = null
     // The overlay flushes trailing speech and calls 'audio:stopped'.
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, AUDIO_STOP_TIMEOUT_MS)
-      this.audioStoppedResolver = () => {
-        clearTimeout(timer)
-        resolve()
-      }
-      if (!this.ctx.overlay.window) {
-        clearTimeout(timer)
-        resolve()
-      }
-    })
-    this.audioStoppedResolver = null
+    await this.waitForAudioStopped(AUDIO_STOP_TIMEOUT_MS)
     await this.queue?.drain(STT_DRAIN_TIMEOUT_MS)
     this.queue?.cancelAll()
     this.queue = null
@@ -261,51 +367,84 @@ export class SessionManager implements LiveContextSource {
       this.summarizer.dispose()
       this.summarizer = null
     }
+    // Lines transcribed during the drain may have armed an auto-suggestion: the call is over.
+    this.scheduler.notifyManualRequest()
     this.deps.ai.cancelScope('live')
+    this.clearSessionTimers()
+    this.deferredMe.clear()
+    this.retrying.clear()
+    this.autoSuggestOverride = null
+    this.lastErrorKind = null
+    this.captureDead = false
     this.deps.history.sessions.end(sessionId, Date.now())
     this.patch({
       status: 'processing',
       audio: { me: { state: 'off', error: null }, them: { state: 'off', error: null } },
       warnings: [],
       showConsentReminder: false,
+      lastError: null,
+      autoSuggest: this.autoSuggestEnabled(),
     })
     this.ctx.overlay.hide()
     this.ctx.showMainWindow({ name: 'session', sessionId, tab: 'notes' })
     const sessionMode = this.modeById(modeId) ?? this.deps.ai.activeMode()
-    await this.deps.postCall.run(sessionId, sessionMode)
-    // A new call may have started while notes were generating; don't clobber it.
-    if (this.state.sessionId === sessionId) {
-      this.state = { ...idleState(this.ctx.settings.get().activeModeId) }
-      this.emit()
-    }
-    this.ctx.log.info(`Session ${sessionId} finished`)
+    // Not awaited: a new call may start while the notes are written.
+    void this.runPostCall(sessionId, sessionMode).then(() => {
+      if (this.state.status === 'processing' && this.state.sessionId === sessionId) this.goIdle()
+      this.ctx.log.info(`Session ${sessionId} finished`)
+    })
   }
 
-  /** Quit during a call: keep everything already transcribed and mark it for "Generate notes". */
+  /**
+   * Quit during a call: let the overlay flush its trailing speech and give speech-to-text a
+   * short, bounded drain so the last seconds are kept; then keep everything already transcribed
+   * and mark the session for "Generate notes" (it is 'recovered', not finalized).
+   */
   async shutdown(): Promise<void> {
     const sessionId = this.state.sessionId
+    const live = !!sessionId && this.isLive()
     this.scheduler.dispose()
+    this.clearSessionTimers()
     this.summarizer?.dispose()
+    this.summarizer = null
+    if (live) {
+      if (this.state.status !== 'stopping') this.patch({ status: 'stopping' })
+      await this.waitForAudioStopped(SHUTDOWN_AUDIO_WAIT_MS)
+      await this.queue?.drain(SHUTDOWN_DRAIN_MS)
+    }
     this.queue?.cancelAll()
-    if (sessionId && this.isLive()) {
+    this.queue = null
+    if (sessionId && live) {
       this.deps.history.sessions.end(sessionId, Date.now())
       this.deps.history.sessions.setStatus(sessionId, 'recovered')
     }
+    this.captureDead = false
     this.state = idleState(this.state.modeId)
   }
 
-  regenerate(sessionId: string): void {
+  /** Regenerates post-call output; `parts` limits it (default: whatever is missing). */
+  regenerate(sessionId: string, parts?: PostCallPart[]): void {
     const s = this.deps.history.sessions.get(sessionId)
     if (!s) throw new AppError('not_found', 'Session not found')
     if (sessionId === this.state.sessionId && this.isLive()) {
       throw new AppError('busy', 'This session is still live.')
     }
     const mode = (s.modeId && this.modeById(s.modeId)) || this.deps.ai.activeMode()
-    void this.deps.postCall.run(sessionId, mode)
+    void this.runPostCall(sessionId, mode, parts)
   }
 
   dismissConsent(): void {
     this.patch({ showConsentReminder: false })
+  }
+
+  /**
+   * The overlay's "Auto-suggest replies" toggle. It overrides Settings › General and the Mode's
+   * auto-suggest flag for the current call only (or the next one, when no call is running) and
+   * is cleared when that call ends or the global setting changes. Nothing is persisted.
+   */
+  setAutoSuggest(enabled: boolean): void {
+    this.autoSuggestOverride = enabled
+    this.patch({ autoSuggest: this.autoSuggestEnabled() })
   }
 
   // ── audio from the overlay renderer ───────────────────────────────────────
@@ -325,6 +464,11 @@ export class SessionManager implements LiveContextSource {
       vadEndAt: input.vadEndAt,
       forced: input.forced,
     }
+    if (job.channel === 'them') {
+      const t0 = this.state.startedAt ?? input.startedAt
+      this.themInFlight.set(job.id, { startMs: input.startedAt - t0, endMs: input.endedAt - t0 })
+      this.scheduler.onThemSegment(job.id, job.vadEndAt)
+    }
     this.queue.enqueue(job)
     return true
   }
@@ -334,13 +478,22 @@ export class SessionManager implements LiveContextSource {
     channel: Channel,
     state: ChannelState,
     error: string | null,
+    code: ChannelErrorCode | null = null,
   ): void {
     if (sessionId !== this.state.sessionId) return
-    const audio = { ...this.state.audio, [channel]: { state, error } }
+    // Capture runs again (the overlay was shown again after its renderer kept crashing).
+    if (state === 'listening') this.captureDead = false
+    const status: ChannelStatus = { state, error, code }
+    const audio = { ...this.state.audio, [channel]: status }
     const anyListening = audio.me.state === 'listening' || audio.them.state === 'listening'
-    const status = this.state.status === 'starting' && anyListening ? 'live' : this.state.status
-    this.patch({ audio, status })
-    this.ctx.events.broadcast('audio:channelStatus', { channel, status: { state, error } })
+    // Leave 'starting' once a channel listens, or once both have given up: the call is then
+    // live (with its error warnings) instead of starting forever.
+    const started =
+      this.state.status === 'starting' &&
+      (anyListening || (settled(audio.me.state) && settled(audio.them.state)))
+    if (started) this.clearStartTimer()
+    this.patch({ audio, status: started ? 'live' : this.state.status })
+    this.ctx.events.broadcast('audio:channelStatus', { channel, status })
   }
 
   setWarning(sessionId: string, code: SessionWarningCode, active: boolean): void {
@@ -350,11 +503,43 @@ export class SessionManager implements LiveContextSource {
 
   setSpeaking(sessionId: string, channel: Channel, speaking: boolean): void {
     if (sessionId !== this.state.sessionId || channel !== 'them') return
+    this.themSpeakingSinceMs = speaking
+      ? (this.themSpeakingSinceMs ?? Math.max(0, this.elapsedMs()))
+      : null
     this.scheduler.setThemSpeaking(speaking)
   }
 
   audioStopped(sessionId: string): void {
-    if (sessionId === this.state.sessionId) this.audioStoppedResolver?.()
+    if (sessionId !== this.state.sessionId) return
+    for (const resolve of [...this.audioStoppedWaiters]) resolve()
+  }
+
+  /**
+   * The overlay renderer, where capture runs, crashed or was killed. Until a renderer reports
+   * 'listening' again both channels show an error, so the call never looks live while nothing
+   * is being captured. `restarting`: the renderer is being reloaded and restarts capture by
+   * itself. Otherwise it keeps crashing and stays gone, and captureFailed() turns true so the
+   * main window and the tray (the overlay is gone) tell the user to show it again or stop.
+   */
+  captureLost(restarting = true): void {
+    const sessionId = this.state.sessionId
+    if (!sessionId) return
+    if (this.state.status === 'stopping') {
+      // Nothing can flush any more; don't wait for 'audio:stopped'.
+      for (const resolve of [...this.audioStoppedWaiters]) resolve()
+      return
+    }
+    if (this.state.status !== 'starting' && this.state.status !== 'live') return
+    if (!restarting) {
+      this.ctx.log.error('Audio capture stopped: the overlay renderer keeps crashing')
+      this.captureDead = true
+    }
+    this.scheduler.setThemSpeaking(false)
+    this.themSpeakingSinceMs = null
+    const message = restarting ? t('live.captureLost') : t('live.captureFailed')
+    for (const channel of CHANNELS) {
+      this.setChannelStatus(sessionId, channel, 'error', message, 'unknown')
+    }
   }
 
   /** Manual requests cancel a pending auto-suggestion (spec: "Cancel it if I trigger something manually"). */
@@ -363,6 +548,64 @@ export class SessionManager implements LiveContextSource {
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
+
+  private runPostCall(sessionId: string, mode: Mode, parts?: PostCallPart[]): Promise<void> {
+    const running = this.postCallJobs.get(sessionId)
+    if (running) return running
+    const job: Promise<void> = this.deps.postCall
+      .run(sessionId, mode, { parts })
+      .catch((err: unknown) => this.ctx.log.error('Post-call generation failed', err))
+      .finally(() => {
+        if (this.postCallJobs.get(sessionId) === job) this.postCallJobs.delete(sessionId)
+      })
+    this.postCallJobs.set(sessionId, job)
+    return job
+  }
+
+  private goIdle(): void {
+    this.buffer = new TranscriptBuffer()
+    this.state = {
+      ...idleState(this.ctx.settings.get().activeModeId),
+      autoSuggest: this.autoSuggestEnabled(),
+    }
+    this.emit()
+  }
+
+  private waitForAudioStopped(timeoutMs: number): Promise<void> {
+    if (!this.ctx.overlay.window) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        this.audioStoppedWaiters.delete(done)
+        resolve()
+      }
+      const timer = setTimeout(done, timeoutMs)
+      this.audioStoppedWaiters.add(done)
+    })
+  }
+
+  private captureStartTimedOut(sessionId: string): void {
+    this.startTimer = null
+    if (this.state.sessionId !== sessionId || this.state.status !== 'starting') return
+    this.ctx.log.warn('Audio capture did not start in time')
+    for (const channel of CHANNELS) {
+      if (this.state.audio[channel].state !== 'starting') continue
+      this.setChannelStatus(sessionId, channel, 'error', t('live.captureStartTimeout'), 'unknown')
+    }
+  }
+
+  private clearStartTimer(): void {
+    if (this.startTimer) clearTimeout(this.startTimer)
+    this.startTimer = null
+  }
+
+  private clearSessionTimers(): void {
+    this.clearStartTimer()
+    if (this.lostTimer) clearTimeout(this.lostTimer)
+    this.lostTimer = null
+    if (this.deferredMeTimer) clearTimeout(this.deferredMeTimer)
+    this.deferredMeTimer = null
+  }
 
   private onTranscribed(job: TranscriptionJob, result: QueuedTranscriptionResult): void {
     if (job.sessionId !== this.state.sessionId || !this.state.startedAt) {
@@ -380,7 +623,11 @@ export class SessionManager implements LiveContextSource {
       text: result.text,
       isFinal: true,
     }
-    this.toggleWarning('stt_error_retrying', false)
+    this.retrying.delete(job.id)
+    this.syncRetryingWarning()
+    // Speech-to-text works, so a key / auth / credits problem is resolved.
+    this.toggleWarning('no_key', false)
+    if (this.lastErrorKind === 'provider') this.setLastError(null, null)
     if (line.channel === 'me') {
       const { drop } = this.deduper.checkMe(line)
       if (drop) {
@@ -388,9 +635,11 @@ export class SessionManager implements LiveContextSource {
         return
       }
     } else {
+      this.themInFlight.delete(job.id)
       // Them lines can retract Me lines that turned out to be speaker echo.
       for (const id of this.deduper.checkThem(line)) {
         this.buffer.remove(id)
+        this.deferredMe.delete(id)
         this.deps.history.transcript.remove(id)
         this.ctx.events.broadcast('transcript:remove', { id, sessionId: line.sessionId })
         this.maybeShowHeadphonesTip()
@@ -404,9 +653,110 @@ export class SessionManager implements LiveContextSource {
       const first = this.sttTiming.keys().next().value
       if (first) this.sttTiming.delete(first)
     }
-    if (line.channel === 'them') this.scheduler.onThemLine(line, { vadEndAt: job.vadEndAt })
-    else this.scheduler.onMeLine(line)
+    if (line.channel === 'them') {
+      // Me lines that were waiting for this Them line first, as if they had arrived in order.
+      this.resolveDeferredMe()
+      if (this.scheduler.onThemLine(line, { vadEndAt: job.vadEndAt }) === 'pending') {
+        // A slower request can deliver their question after my reply to it. Had the lines
+        // arrived in the order they were spoken, that reply would have cancelled the
+        // suggestion, so it does now.
+        const reply = this.meLineEndedAfter(line)
+        if (reply) this.scheduler.onMeLine(reply)
+      }
+    } else {
+      this.onMeLineKept(line)
+    }
     this.summarizer?.maybeUpdate(this.buffer.finals(), this.elapsedMs())
+  }
+
+  /**
+   * A kept Me line normally cancels a pending auto-suggestion right away ("I started talking").
+   * But on speakers it may be the echo of Them speech whose own line is still being transcribed;
+   * that Them line would retract it, and must not have cancelled the suggestion first. Such a
+   * line waits until no Them speech that could match it is pending (or ECHO_WAIT_MAX_MS).
+   */
+  private onMeLineKept(line: TranscriptLine): void {
+    if (!this.mayBeEcho(line)) {
+      this.scheduler.onMeLine(line)
+      return
+    }
+    this.deferredMe.set(line.id, { line, deadline: Date.now() + ECHO_WAIT_MAX_MS })
+    this.armDeferredMeTimer()
+  }
+
+  /**
+   * A kept Me line that ended after `them` ended, i.e. I was still or again talking after they
+   * finished. Lines still waiting as a possible echo are not counted: they follow on release.
+   */
+  private meLineEndedAfter(them: TranscriptLine): TranscriptLine | null {
+    for (const line of this.buffer.finals()) {
+      if (line.channel === 'me' && line.endMs > them.endMs && !this.deferredMe.has(line.id))
+        return line
+    }
+    return null
+  }
+
+  /** True while Them speech within the echo window of `line` has not been transcribed yet. */
+  private mayBeEcho(line: TranscriptLine): boolean {
+    if (
+      this.themSpeakingSinceMs !== null &&
+      this.themSpeakingSinceMs <= line.endMs + ECHO_WINDOW_MS
+    )
+      return true
+    for (const seg of this.themInFlight.values()) {
+      if (seg.startMs <= line.endMs + ECHO_WINDOW_MS && seg.endMs >= line.startMs - ECHO_WINDOW_MS)
+        return true
+    }
+    return false
+  }
+
+  private resolveDeferredMe(): void {
+    if (this.deferredMe.size === 0) return
+    const now = Date.now()
+    for (const [id, { line, deadline }] of this.deferredMe) {
+      if (!this.buffer.get(id)) {
+        this.deferredMe.delete(id) // retracted as echo
+        continue
+      }
+      if (now < deadline && this.mayBeEcho(line)) continue
+      this.deferredMe.delete(id)
+      this.scheduler.onMeLine(line)
+    }
+    this.armDeferredMeTimer()
+  }
+
+  private armDeferredMeTimer(): void {
+    if (this.deferredMeTimer) clearTimeout(this.deferredMeTimer)
+    this.deferredMeTimer = null
+    if (this.deferredMe.size === 0) return
+    const next = Math.min(...[...this.deferredMe.values()].map((d) => d.deadline))
+    this.deferredMeTimer = setTimeout(
+      () => {
+        this.deferredMeTimer = null
+        this.resolveDeferredMe()
+      },
+      Math.max(0, next - Date.now()),
+    )
+  }
+
+  /**
+   * A request succeeded (maybe on a retry). Its line can still wait behind a slower earlier
+   * segment of the channel, but the job is no longer retrying.
+   */
+  private onSttReady(job: TranscriptionJob): void {
+    if (!this.retrying.delete(job.id) || job.sessionId !== this.state.sessionId) return
+    this.syncRetryingWarning()
+  }
+
+  /** A segment that will produce no line (dropped, cancelled or failed for good). */
+  private onSegmentGone(job: TranscriptionJob): void {
+    this.retrying.delete(job.id)
+    if (job.sessionId !== this.state.sessionId) return
+    this.syncRetryingWarning()
+    if (job.channel !== 'them') return
+    this.themInFlight.delete(job.id)
+    this.resolveDeferredMe()
+    this.scheduler.onThemSegmentDone(job.id)
   }
 
   private persistLate(job: TranscriptionJob, result: QueuedTranscriptionResult): void {
@@ -424,15 +774,58 @@ export class SessionManager implements LiveContextSource {
   }
 
   private onSttError(
-    _job: TranscriptionJob,
+    job: TranscriptionJob,
     err: ProviderError,
-    info: { willRetry: boolean },
+    info: TranscriptionErrorInfo,
   ): void {
-    if (err.code === 'no_key' || err.code === 'auth' || err.code === 'credits') {
-      this.patch({ lastError: err.message })
+    if (job.sessionId !== this.state.sessionId) {
+      this.retrying.delete(job.id)
+      return
+    }
+    const blocking = err.code === 'no_key' || err.code === 'auth' || err.code === 'credits'
+    if (blocking) {
+      this.setLastError(err.message, 'provider')
       if (err.code === 'no_key') this.toggleWarning('no_key', true)
     }
-    this.toggleWarning('stt_error_retrying', info.willRetry)
+    if (info.willRetry) {
+      this.retrying.add(job.id)
+      this.syncRetryingWarning()
+      return
+    }
+    this.onSegmentGone(job)
+    if (!blocking && err.code !== 'aborted') this.noteLostSegment()
+  }
+
+  /** A segment failed for good: say so for a while instead of losing its speech silently. */
+  private noteLostSegment(): void {
+    this.lostSegments++
+    // A key or credits problem explains the loss better; don't replace it.
+    if (this.lastErrorKind === 'provider') return
+    this.setLastError(t('live.sttLost', { count: this.lostSegments }), 'lost')
+    if (this.lostTimer) clearTimeout(this.lostTimer)
+    this.lostTimer = setTimeout(() => {
+      this.lostTimer = null
+      if (this.lastErrorKind === 'lost') this.setLastError(null, null)
+    }, STT_LOST_NOTICE_MS)
+    this.lostTimer.unref?.()
+  }
+
+  /** "Transcription error (retrying)" shows while any job of this call waits for a retry. */
+  private syncRetryingWarning(): void {
+    this.toggleWarning('stt_error_retrying', this.retrying.size > 0)
+  }
+
+  private setLastError(message: string | null, kind: 'provider' | 'lost' | null): void {
+    this.lastErrorKind = message ? kind : null
+    if (this.state.lastError !== message) this.patch({ lastError: message })
+  }
+
+  /** The API key was added, replaced or removed during a call. */
+  private onKeyChanged(): void {
+    if (!this.isLive()) return
+    const hasKey = !!this.ctx.secrets.getKey()
+    this.toggleWarning('no_key', !hasKey)
+    if (hasKey && this.lastErrorKind === 'provider') this.setLastError(null, null)
   }
 
   private async runAuto(trigger: AutoTrigger, signal: AbortSignal): Promise<void> {
@@ -453,6 +846,7 @@ export class SessionManager implements LiveContextSource {
   }
 
   private autoSuggestEnabled(): boolean {
+    if (this.autoSuggestOverride !== null) return this.autoSuggestOverride
     const s = this.ctx.settings.get()
     const mode = this.modeById(s.activeModeId)
     return s.general.autoSuggest && (mode?.autoSuggest ?? true)

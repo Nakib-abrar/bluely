@@ -71,7 +71,20 @@ export interface TranscriptionQueueOptions {
   now?: () => number
   /** Peak-window RMS below which a segment is skipped as silent (default 0.004). */
   silenceThreshold?: number
-  /** Delivered in segment.startedAt order per channel. */
+  /**
+   * Longest a finished result waits behind an earlier segment of its channel that is still being
+   * transcribed (default 2500 ms). After that it is delivered out of order.
+   */
+  maxOrderHoldMs?: number
+  /**
+   * A request returned usable text (also after failed attempts). The result can still be held
+   * behind an earlier segment of its channel; onResult follows.
+   */
+  onReady?(job: TranscriptionJob): void
+  /**
+   * Delivered in segment.startedAt order per channel, except that a result held longer than
+   * maxOrderHoldMs behind a slow earlier request is delivered before it.
+   */
   onResult(job: TranscriptionJob, result: QueuedTranscriptionResult): void
   /** Every failed attempt; `info.willRetry` is false on the final one. */
   onError(job: TranscriptionJob, err: ProviderError, info: TranscriptionErrorInfo): void
@@ -87,6 +100,7 @@ export interface TranscriptionQueueOptions {
 const BACKOFF_MS = [500, 1500]
 const MAX_BACKOFF_MS = 5000
 const LATENCY_WINDOW = 20
+const DEFAULT_MAX_ORDER_HOLD_MS = 2500
 
 type EntryState = 'queued' | 'running' | 'ready' | 'released'
 
@@ -97,6 +111,10 @@ interface Entry {
   header: WavHeader
   rms: number | null
   result: QueuedTranscriptionResult | null
+  /** now() when the result became ready (bounds how long ordering may hold it). */
+  readyAt: number | null
+  /** Took so long that later results were delivered before it; it holds nothing any more. */
+  bypassed: boolean
   /** Attempts started so far. */
   attempt: number
   controller: AbortController | null
@@ -110,6 +128,8 @@ interface ChannelState {
   /** Entries waiting for a slot, in the same order. */
   waiting: Entry[]
   running: number
+  /** Wakes flush() when the oldest held result reaches maxOrderHoldMs. */
+  holdTimer: ReturnType<typeof setTimeout> | null
 }
 
 /** Retry delay for the attempt that just failed. Honours Retry-After up to 5 s. */
@@ -132,7 +152,9 @@ function toProviderError(err: unknown): ProviderError {
 /**
  * Turns VAD segments into transcript text: skips near-silent audio, runs up to N requests per
  * channel in parallel, retries transient failures with backoff, filters empty/hallucinated
- * text and delivers results per channel in the order the segments were spoken.
+ * text and delivers results per channel in the order the segments were spoken. One slow
+ * request holds later results of its channel for at most maxOrderHoldMs; consumers place lines
+ * by startMs, so a result that arrives late still lands in the right spot.
  *
  * Callbacks never fire synchronously inside enqueue().
  */
@@ -142,6 +164,7 @@ export class TranscriptionQueue {
   private readonly now: () => number
   private readonly maxRetries: number
   private readonly silenceThreshold: number
+  private readonly maxOrderHoldMs: number
   private concurrency: number
   private readonly channels = new Map<Channel, ChannelState>()
   private readonly idleWaiters = new Set<() => void>()
@@ -158,6 +181,7 @@ export class TranscriptionQueue {
     this.now = opts.now ?? Date.now
     this.maxRetries = Math.max(0, Math.floor(opts.maxRetries ?? 2))
     this.silenceThreshold = opts.silenceThreshold ?? SILENCE_RMS_THRESHOLD
+    this.maxOrderHoldMs = Math.max(0, opts.maxOrderHoldMs ?? DEFAULT_MAX_ORDER_HOLD_MS)
     this.concurrency = TranscriptionQueue.clampConcurrency(opts.concurrencyPerChannel ?? 2)
   }
 
@@ -202,6 +226,8 @@ export class TranscriptionQueue {
       header,
       rms,
       result: null,
+      readyAt: null,
+      bypassed: false,
       attempt: 0,
       controller: null,
       wake: null,
@@ -298,7 +324,7 @@ export class TranscriptionQueue {
   private channel(channel: Channel): ChannelState {
     let ch = this.channels.get(channel)
     if (!ch) {
-      ch = { order: [], waiting: [], running: 0 }
+      ch = { order: [], waiting: [], running: 0, holdTimer: null }
       this.channels.set(channel, ch)
     }
     return ch
@@ -393,6 +419,11 @@ export class TranscriptionQueue {
       }
       ch.running--
       entry.state = 'ready'
+      entry.readyAt = this.now()
+      if (this.opts.onReady) {
+        const onReady = this.opts.onReady
+        this.safe('onReady', () => onReady(job))
+      }
       this.afterRelease(ch)
       return
     }
@@ -432,21 +463,66 @@ export class TranscriptionQueue {
     this.checkIdle()
   }
 
-  /** Delivers ready results from the head of the channel's order; released slots are skipped. */
+  /**
+   * Delivers results in the channel's order; released slots are skipped. A request that is
+   * still running (or waiting for a retry, up to a minute with timeouts × retries) holds the
+   * results behind it until one of them has waited maxOrderHoldMs. From then on it no longer
+   * holds anything: the results behind it are delivered, and it follows whenever it finishes.
+   */
   private flush(ch: ChannelState): void {
-    while (ch.order.length > 0) {
-      const head = ch.order[0]
-      if (!head || (head.state !== 'ready' && head.state !== 'released')) return
-      ch.order.shift()
-      if (head.state === 'ready' && head.result) {
-        const result = head.result
-        head.result = null
-        this.completed++
-        this.latencies.push(result.endToTextMs)
-        if (this.latencies.length > LATENCY_WINDOW) this.latencies.shift()
-        this.safe('onResult', () => this.opts.onResult(head.job, result))
+    if (ch.holdTimer) clearTimeout(ch.holdTimer)
+    ch.holdTimer = null
+    const now = this.now()
+    let lastExpired = -1
+    ch.order.forEach((e, i) => {
+      if (e.state === 'ready' && e.readyAt !== null && now - e.readyAt >= this.maxOrderHoldMs) {
+        lastExpired = i
+      }
+    })
+    for (let i = 0; i < lastExpired; i++) {
+      const e = ch.order[i]
+      if (e && (e.state === 'queued' || e.state === 'running')) e.bypassed = true
+    }
+    const due: Entry[] = []
+    const kept: Entry[] = []
+    let blocked = false
+    for (const e of ch.order) {
+      if (!blocked && (e.state === 'ready' || e.state === 'released')) {
+        due.push(e)
+        continue
+      }
+      if ((e.state === 'queued' || e.state === 'running') && !e.bypassed) blocked = true
+      kept.push(e)
+    }
+    ch.order.splice(0, ch.order.length, ...kept)
+    for (const e of due) this.deliver(e)
+
+    let next = Infinity
+    for (const e of ch.order) {
+      if (e.state === 'ready' && e.readyAt !== null) {
+        next = Math.min(next, e.readyAt + this.maxOrderHoldMs)
       }
     }
+    if (Number.isFinite(next)) {
+      ch.holdTimer = setTimeout(
+        () => {
+          ch.holdTimer = null
+          this.flush(ch)
+          this.checkIdle()
+        },
+        Math.max(0, next - now),
+      )
+    }
+  }
+
+  private deliver(entry: Entry): void {
+    const result = entry.result
+    if (entry.state !== 'ready' || !result) return
+    entry.result = null
+    this.completed++
+    this.latencies.push(result.endToTextMs)
+    if (this.latencies.length > LATENCY_WINDOW) this.latencies.shift()
+    this.safe('onResult', () => this.opts.onResult(entry.job, result))
   }
 
   private countDrop(job: TranscriptionJob, reason: TranscriptionDropReason): void {

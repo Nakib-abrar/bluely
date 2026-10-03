@@ -78,6 +78,7 @@ describe('SessionManager', () => {
   it('auto-suggests after a Them question (debounced) with the Auto label', async () => {
     const h = setup()
     const { sessionId } = await h.session.start()
+    h.session.setChannelStatus(sessionId, 'them', 'listening', null)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     const t0 = h.lastState().startedAt as number
     h.session.acceptSegment(segment(sessionId, 'them', t0 + 1000, t0 + 3000))
@@ -117,6 +118,9 @@ describe('SessionManager', () => {
     expect(h.lastState().status).toBe('stopping')
     h.session.audioStopped(sessionId)
     await stopping
+    // The notes are generated in the background; a new call could start meanwhile.
+    expect(h.lastState().status).toBe('processing')
+    await h.session.whenPostCallIdle()
     const detail = h.history.sessions.getDetail(sessionId)
     expect(detail?.status).toBe('done')
     expect(detail?.title).toBe('Pricing call')

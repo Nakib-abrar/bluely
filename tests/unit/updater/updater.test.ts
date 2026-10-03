@@ -468,4 +468,40 @@ describe('wireUpdater', () => {
     expect(fake.checkForUpdates).not.toHaveBeenCalled()
     portable.dispose()
   })
+
+  function installError(install: () => unknown): AppError | null {
+    try {
+      install()
+      return null
+    } catch (err) {
+      return err as AppError
+    }
+  }
+
+  it('refuses "Restart to update" while a call is live (installing quits Bluely)', () => {
+    let busy: 'live' | 'notes' | null = 'live'
+    const updater = wireUpdater(ctx(false), { isPortable: false, sessionBusy: () => busy })
+    const install = handlers.get('updater:install') as () => unknown
+    const thrown = installError(install)
+    expect(thrown).toBeInstanceOf(AppError)
+    expect(thrown?.code).toBe('session_live')
+    expect(fake.quitAndInstall).not.toHaveBeenCalled()
+    // Not busy: falls through to the normal checks (unsupported in an unpackaged build).
+    busy = null
+    expect(() => install()).toThrow(AppError)
+    expect(() => install()).not.toThrow(/Stop the call|notes/)
+    updater.dispose()
+  })
+
+  it('refuses it while the notes of the call that just ended are being written', () => {
+    const updater = wireUpdater(ctx(false), { isPortable: false, sessionBusy: () => 'notes' })
+    const thrown = installError(handlers.get('updater:install') as () => unknown)
+    expect(thrown).toBeInstanceOf(AppError)
+    expect(thrown?.code).toBe('busy')
+    expect(thrown?.message).toBe(
+      'The notes of the last call are still being written. Restart to update once they are done.',
+    )
+    expect(fake.quitAndInstall).not.toHaveBeenCalled()
+    updater.dispose()
+  })
 })

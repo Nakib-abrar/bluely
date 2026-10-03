@@ -1,4 +1,5 @@
-import { Menu, Tray, nativeImage } from 'electron'
+import { Menu, Tray, nativeImage, type MenuItemConstructorOptions } from 'electron'
+import { t } from '@shared/i18n'
 import { resourcePath } from './resources'
 
 export interface TrayActions {
@@ -8,6 +9,8 @@ export interface TrayActions {
   openSettings: () => void
   quit: () => void
   isLive: () => boolean
+  /** The live call is no longer captured: the overlay, where capture runs, keeps crashing. */
+  captureFailed: () => boolean
   isOverlayVisible: () => boolean
 }
 
@@ -27,9 +30,17 @@ export class AppTray {
 
   refresh(): void {
     const live = this.actions.isLive()
-    this.tray.setToolTip(live ? 'Bluely: listening' : 'Bluely')
+    const failed = live && this.actions.captureFailed()
+    this.tray.setToolTip(
+      failed ? t('live.trayTooltipCaptureFailed') : live ? 'Bluely: listening' : 'Bluely',
+    )
+    // The overlay is gone then; "Show overlay" below builds a new one, which restarts capture.
+    const status: MenuItemConstructorOptions[] = failed
+      ? [{ label: t('live.trayCaptureFailed'), enabled: false }, { type: 'separator' }]
+      : []
     this.tray.setContextMenu(
       Menu.buildFromTemplate([
+        ...status,
         { label: 'Open Bluely', click: () => this.actions.openMain() },
         {
           label: live ? 'Stop session' : 'Start Bluely',

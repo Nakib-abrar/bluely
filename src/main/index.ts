@@ -116,7 +116,8 @@ async function start(): Promise<void> {
       events,
       isTrusted,
       startHidden,
-      onCloseRequested: () => (!quitting && features?.isLive() ? 'minimize' : 'close'),
+      // During a call, or while its notes are still being written, closing must not quit.
+      onCloseRequested: () => (!quitting && features?.isBusy() ? 'minimize' : 'close'),
     })
     win.on('closed', () => {
       // Closing the main window quits Bluely (the overlay never outlives it).
@@ -145,6 +146,7 @@ async function start(): Promise<void> {
     },
     quit,
     isLive: () => !!features?.isLive(),
+    captureFailed: () => !!features?.captureFailed(),
     isOverlayVisible: () => overlay.isVisible(),
   })
   events.subscribe('session:state', () => tray?.refresh())
@@ -163,8 +165,10 @@ function quit(): void {
   app.quit()
 }
 
-// Every quit path (tray, Settings › Quit, closing the main window, OS logoff) runs the
-// feature shutdown once so a live session is finalized before the process exits.
+// Every quit path (tray, Settings › Quit, closing the main window, updater) runs the feature
+// shutdown once, bounded to 4 s. A live call keeps everything transcribed up to then (the
+// overlay flushes its last speech and speech-to-text gets a short drain) and is marked
+// 'recovered' so the user can generate its notes later; it is not finalized here.
 app.on('before-quit', (event) => {
   quitting = true
   if (shutdownDone) return

@@ -1,4 +1,5 @@
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
+import { t } from '@shared/i18n'
 import { updater as updaterMessages } from '@shared/i18n/en/updater'
 import { RELEASES_URL } from '@shared/constants'
 import type { UpdateStatus } from '@shared/types'
@@ -327,8 +328,16 @@ export class Updater {
   }
 }
 
-/** Registers the updater IPC handlers and starts background checks (installed builds only). */
-export function wireUpdater(ctx: CoreContext, opts: { isPortable: boolean }): Updater {
+/**
+ * Registers the updater IPC handlers and starts background checks (installed builds only).
+ * `sessionBusy`: installing quits Bluely, so "Restart to update" is refused during a call
+ * ('live') and while the notes of one that just ended are being written ('notes'), which
+ * quitting would abandon (the call would come back as 'recovered', its notes to pay for again).
+ */
+export function wireUpdater(
+  ctx: CoreContext,
+  opts: { isPortable: boolean; sessionBusy?: () => 'live' | 'notes' | null },
+): Updater {
   const updater = new Updater({
     events: ctx.events,
     log: ctx.log.child('updater'),
@@ -337,7 +346,12 @@ export function wireUpdater(ctx: CoreContext, opts: { isPortable: boolean }): Up
   })
   handle('updater:check', () => updater.check())
   handle('updater:download', () => updater.download())
-  handle('updater:install', () => updater.install())
+  handle('updater:install', () => {
+    const busy = opts.sessionBusy?.() ?? null
+    if (busy === 'live') throw new AppError('session_live', t('live.updateBlockedLive'))
+    if (busy === 'notes') throw new AppError('busy', t('live.updateBlockedNotes'))
+    updater.install()
+  })
   handle('updater:getStatus', () => updater.status())
   updater.startAutoCheck()
   return updater

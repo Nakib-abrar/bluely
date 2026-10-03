@@ -172,6 +172,48 @@ describe('TranscriptionQueue concurrency and ordering', () => {
     expect(h.results.map((r) => r.job.id)).toEqual([early.id, late.id])
   })
 
+  it('stops holding results behind a request that is stuck for longer than maxOrderHoldMs', async () => {
+    vi.useFakeTimers()
+    const h = harness({ now: () => Date.now(), concurrencyPerChannel: 3 })
+    const [stuck, second, third] = [job('them', 100), job('them', 200), job('them', 300)]
+    for (const j of [stuck, second, third]) h.q.enqueue(j)
+    await flushMicrotasks()
+    h.stt.callFor(second.segment.wav)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    await vi.advanceTimersByTimeAsync(2_499)
+    expect(h.results).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    // The STT timeout (20 s × 3 attempts) no longer freezes the channel.
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id])
+    // Once bypassed, the stuck request holds nothing: later results flow right away.
+    h.stt.callFor(third.segment.wav)!.d.resolve(sttResult('Third sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id, third.id])
+    // It is still delivered whenever it finishes (consumers place lines by startMs).
+    h.stt.callFor(stuck.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id, third.id, stuck.id])
+    expect(h.q.isIdle()).toBe(true)
+  })
+
+  it('honours a custom maxOrderHoldMs and keeps order when the head finishes in time', async () => {
+    vi.useFakeTimers()
+    const h = harness({ now: () => Date.now(), maxOrderHoldMs: 500 })
+    const first = job('me', 100)
+    const second = job('me', 200)
+    h.q.enqueue(first)
+    h.q.enqueue(second)
+    await flushMicrotasks()
+    h.stt.callFor(second.segment.wav)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    await vi.advanceTimersByTimeAsync(400)
+    h.stt.callFor(first.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([first.id, second.id])
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(h.results).toHaveLength(2)
+  })
+
   it('keeps channels independent', async () => {
     const h = harness()
     const me1 = job('me', 1)
@@ -277,6 +319,42 @@ describe('TranscriptionQueue retries', () => {
     expect(h.results).toHaveLength(1)
     expect(h.results[0]!.result.attempts).toBe(3)
     expect(h.q.stats()).toMatchObject({ completed: 1, failed: 0, inFlight: 0 })
+  })
+
+  it('reports a successful retry with onReady while its result is still held for ordering', async () => {
+    vi.useFakeTimers()
+    const ready: string[] = []
+    const h = harness({ onReady: (j) => ready.push(j.id) })
+    const slow = job('them', 100)
+    const retried = job('them', 200)
+    h.q.enqueue(slow)
+    h.q.enqueue(retried)
+    await flushMicrotasks()
+    h.stt.callFor(retried.segment.wav)!.d.reject(new ProviderError('server', { status: 502 }))
+    await flushMicrotasks()
+    expect(h.errors.map((e) => e.info.willRetry)).toEqual([true])
+    await vi.advanceTimersByTimeAsync(500)
+    h.stt.calls.at(-1)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    // The retry worked (the UI can stop saying "retrying") though the line waits for `slow`.
+    expect(ready).toEqual([retried.id])
+    expect(h.results).toHaveLength(0)
+    h.stt.callFor(slow.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(ready).toEqual([retried.id, slow.id])
+    expect(h.results.map((r) => r.job.id)).toEqual([slow.id, retried.id])
+  })
+
+  it('does not report onReady for text that is dropped', async () => {
+    const ready: string[] = []
+    const h = harness({ onReady: (j) => ready.push(j.id) })
+    const j = job('me', 100)
+    h.q.enqueue(j)
+    await flushMicrotasks()
+    h.stt.calls[0]!.d.resolve(sttResult('   '))
+    await flushMicrotasks()
+    expect(h.drops.map((d) => d.reason)).toEqual(['empty'])
+    expect(ready).toEqual([])
   })
 
   it('gives up after maxRetries, reports willRetry:false and releases the ordering slot', async () => {

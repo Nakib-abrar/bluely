@@ -371,6 +371,77 @@ describe('AutoSuggestScheduler: VAD-anchored debounce and speaking hold', () => 
     expect(runs[0]?.text).toBe('How would you approach it? given our budget')
   })
 
+  it('waits for a continuation that is still being transcribed, then answers the whole question', () => {
+    const { scheduler, runs } = anchored()
+    const t0 = Date.now()
+    // "What's your budget?" ends at t0; they go on at +300 ms; its line arrives at +1000 ms.
+    vi.advanceTimersByTime(300)
+    scheduler.setThemSpeaking(true)
+    vi.advanceTimersByTime(700)
+    const question = them('What is your budget?')
+    expect(scheduler.onThemLine(question, { vadEndAt: t0 })).toBe('pending')
+    // They stop at +2500 ms; that segment goes to speech-to-text (≈1 s).
+    vi.advanceTimersByTime(1500)
+    const continuation = them('for the Q3 rollout, including training?')
+    scheduler.setThemSpeaking(false)
+    scheduler.onThemSegment(continuation.id, t0 + 2500)
+    // The plain debounce would have fired at +3200 ms with only the first fragment.
+    vi.advanceTimersByTime(999)
+    expect(runs).toHaveLength(0)
+    expect(scheduler.onThemLine(continuation, { vadEndAt: t0 + 2500 })).toBe('merged')
+    // They have been silent for 1 s already: no further debounce.
+    vi.advanceTimersByTime(0)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]?.text).toBe('What is your budget? for the Q3 rollout, including training?')
+    expect(runs[0]?.lineIds).toEqual([question.id, continuation.id])
+  })
+
+  it('stops waiting for the continuation after continuationWaitMs', () => {
+    const { scheduler, runs } = anchored()
+    const t0 = Date.now()
+    scheduler.onThemLine(them('Where are you based?'), { vadEndAt: t0 - 1000 })
+    scheduler.onThemSegment('slow-segment', t0 - 200)
+    // Waits up to 2 s after that segment ended…
+    vi.advanceTimersByTime(1799)
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    // …then answers with what it has.
+    expect(runs).toHaveLength(1)
+    expect(runs[0]?.text).toBe('Where are you based?')
+  })
+
+  it('a continuation segment that produced no line counts as their last speech', () => {
+    const { scheduler, runs } = anchored()
+    const t0 = Date.now()
+    scheduler.onThemLine(them('Can you share the deck?'), { vadEndAt: t0 - 900 })
+    scheduler.onThemSegment('cough', t0)
+    vi.advanceTimersByTime(100)
+    scheduler.onThemSegmentDone('cough') // dropped as silence
+    vi.advanceTimersByTime(599)
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(runs).toHaveLength(1)
+  })
+
+  it('does not wait for segments that ended before the question', () => {
+    const { scheduler, runs } = anchored()
+    const t0 = Date.now()
+    scheduler.onThemSegment('older', t0 - 5000)
+    scheduler.onThemLine(them('Does Tuesday work?'), { vadEndAt: t0 - 900 })
+    vi.advanceTimersByTime(0)
+    expect(runs).toHaveLength(1)
+  })
+
+  it('does not merge a line from before the question that was transcribed late', () => {
+    const { scheduler, runs } = anchored()
+    scheduler.onThemLine(them('Does Tuesday work?', 10_000), { vadEndAt: Date.now() - 900 })
+    expect(scheduler.onThemLine(them('Earlier statement.', 4_000), { vadEndAt: null })).toBe(
+      'ignored',
+    )
+    vi.advanceTimersByTime(0)
+    expect(runs[0]?.text).toBe('Does Tuesday work?')
+  })
+
   it('without the option keeps the classic debounce from now', () => {
     const runs: AutoTrigger[] = []
     const scheduler = new AutoSuggestScheduler({
