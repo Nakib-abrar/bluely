@@ -1,6 +1,7 @@
 import { Dialog as D } from 'radix-ui'
 import { X } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { t } from '@shared/i18n'
 import { cn } from './cn'
 
 export interface DialogProps {
@@ -47,7 +48,7 @@ export function Dialog({
           {children}
           {footer ? <div className="mt-5 flex justify-end gap-2">{footer}</div> : null}
           <D.Close
-            aria-label="Close"
+            aria-label={t('common.close')}
             className="absolute top-4 right-4 inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted hover:bg-panel-3 hover:text-fg"
           >
             <X size={16} />

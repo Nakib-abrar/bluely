@@ -45,11 +45,28 @@ export function routerReducer(state: RouterState, action: RouterAction): RouterS
   }
 }
 
+/**
+ * Where keyboard focus belongs on the home page after 'back': the history row of the meeting
+ * being left (a session id), the home page itself (null; e.g. the meeting was just deleted), or
+ * undefined when back does not land on the home page (the next page focuses its own heading).
+ */
+export function homeFocusAfterBack(
+  state: RouterState,
+  opts: { deleted?: boolean } = {},
+): string | null | undefined {
+  if (state.stack.length < 2 || state.stack[state.stack.length - 2]?.name !== 'home')
+    return undefined
+  const top = currentRoute(state)
+  return !opts.deleted && top.name === 'session' ? top.sessionId : null
+}
+
 /** Navigation API shared with every page component through context. */
 export interface Nav {
   route: MainWindowRoute
   canGoBack: boolean
   back(): void
+  /** Back after the current meeting was deleted (focus cannot return to its row). */
+  backAfterDelete(): void
   openSession(sessionId: string, tab?: SessionTab): void
   setTab(tab: SessionTab): void
   goHome(): void

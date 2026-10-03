@@ -26,3 +26,39 @@ export function moveResultFocus(from: HTMLElement, delta: 1 | -1): boolean {
   next.scrollIntoView({ block: 'nearest' })
   return true
 }
+
+/** Attribute on each history row's open button (SessionRow): the session id it opens. */
+export const SESSION_ROW_ATTR = 'data-session-id'
+
+/** Attribute on the home page root (HomePage), focused when no row can be. */
+export const HOME_FOCUS_ATTR = 'data-home-focus'
+
+function isTyping(el: Element | null): boolean {
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false
+  return el.checkVisibility({ visibilityProperty: true })
+}
+
+/**
+ * Moves focus to a page heading that just appeared. Leaves it alone when the user already
+ * started typing in a visible field (e.g. the search box) while the page loaded.
+ */
+export function focusPageHeading(heading: HTMLElement | null): void {
+  if (!heading || isTyping(document.activeElement)) return
+  heading.focus({ preventScroll: true })
+}
+
+/**
+ * Back on the home page: focuses the history row of the meeting the user came from, or the
+ * home page itself when that row is gone (deleted) or `sessionId` is null.
+ */
+export function focusHomeTarget(sessionId: string | null): void {
+  const row = sessionId
+    ? document.querySelector<HTMLElement>(`[${SESSION_ROW_ATTR}="${CSS.escape(sessionId)}"]`)
+    : null
+  if (row) {
+    row.focus()
+    row.scrollIntoView({ block: 'nearest' })
+    return
+  }
+  document.querySelector<HTMLElement>(`[${HOME_FOCUS_ATTR}]`)?.focus({ preventScroll: true })
+}

@@ -255,7 +255,8 @@ const CHAT_HISTORY: AiCard[] = [
     error: null,
     stats: STATS,
     citations: [],
-    createdAt: at(0, 11, 40),
+    // Earlier than any question asked during the run, whatever the time of day.
+    createdAt: Date.now() - 2 * 3_600_000,
   },
 ]
 
@@ -376,7 +377,10 @@ async function installFakes(app: ElectronApplication, state: FakeState): Promise
       g.__fake.sessions = g.__fake.sessions.filter((s) => s.id !== req['id'])
     })
     replace('sessions:regenerate', () => undefined)
-    replace('sessions:updateEmail', () => undefined)
+    replace('sessions:updateEmail', (req) => {
+      const d = g.__fake.details[req['id'] as string]
+      if (d) d.email = { subject: req['subject'] as string, body: req['body'] as string }
+    })
     replace('sessions:openMailDraft', () => undefined)
     replace('sessions:exportMarkdown', (req) => ({
       path:
@@ -540,6 +544,35 @@ async function push(app: ElectronApplication, event: string, payload: unknown): 
   )
 }
 
+/** Changes a meeting in the fake backend and broadcasts sessions:changed, as main does. */
+async function changeDetail(
+  app: ElectronApplication,
+  id: string,
+  patch: Partial<SessionDetail>,
+): Promise<void> {
+  await app.evaluate(
+    ({ BrowserWindow }, [sid, p]) => {
+      const g = globalThis as unknown as {
+        __fake: { details: Record<string, Record<string, unknown>> }
+      }
+      Object.assign(g.__fake.details[sid as string]!, p)
+      for (const w of BrowserWindow.getAllWindows())
+        w.webContents.send('sessions:changed', { id: sid })
+    },
+    [id, patch] as const,
+  )
+}
+
+/** Broadcasts settings:changed with the fake settings' activeTier changed (overlay chip). */
+async function setFakeTier(app: ElectronApplication, tier: 'fast' | 'smart'): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, activeTier) => {
+    const g = globalThis as unknown as { __settings: Record<string, Record<string, unknown>> }
+    g.__settings = { ...g.__settings, models: { ...g.__settings['models'], activeTier } }
+    for (const w of BrowserWindow.getAllWindows())
+      w.webContents.send('settings:changed', g.__settings)
+  }, tier)
+}
+
 async function setSettings(page: Page, patch: Record<string, unknown>): Promise<void> {
   await page.evaluate((p) => window.bluely.invoke('settings:update', { patch: p }), patch)
 }
@@ -639,6 +672,24 @@ test('mode pill lists modes and switches the active one', async () => {
   await expect(page.getByRole('button', { name: /Mode: Sales call/ })).toBeVisible()
   const sent = await calls(ctx.app, 'modes:setActive')
   expect(sent.at(-1)?.req).toEqual({ id: 'builtin-sales' })
+})
+
+test('header subtitle names the model that answers (Mode override, Fast/Smart tier)', async () => {
+  // Sales call is active now; give it a Smart override the way the Modes editor would.
+  const withOverride = MODES.map((m) =>
+    m.id === 'builtin-sales'
+      ? { ...m, modelOverrides: { smart: 'anthropic/claude-sonnet-4.5' } }
+      : m,
+  )
+  await push(ctx.app, 'modes:changed', withOverride)
+  await expect(page.getByText('claude-sonnet-4.5', { exact: true })).toBeVisible()
+  // The overlay chip switches answers to the Fast tier (no override for it). Broadcast it from
+  // the fake settings, like modes:setActive does, so the real store keeps its state.
+  await setFakeTier(ctx.app, 'fast')
+  await expect(page.getByText('llama-3.3-70b-instruct', { exact: true })).toBeVisible()
+  await setFakeTier(ctx.app, 'smart')
+  await push(ctx.app, 'modes:changed', MODES)
+  await expect(page.getByText('gemini-2.5-flash', { exact: true })).toBeVisible()
 })
 
 test('notice dismiss calls app:dismissNotice', async () => {
@@ -753,6 +804,30 @@ test('session page: notes, rename, export and copy', async () => {
   ])
 })
 
+test('session page: a background title change does not discard the title being typed', async () => {
+  await page.getByRole('button', { name: 'Q3 roadmap review: Acme' }).click()
+  const input = page.getByTestId('title-input')
+  await input.fill('Acme pricing kickoff')
+  // Notes finish meanwhile and main stores its own title.
+  const loads = (await calls(ctx.app, 'sessions:get')).length
+  await changeDetail(ctx.app, 's1', { title: 'Pricing discussion with Acme' })
+  await expect
+    .poll(async () => (await calls(ctx.app, 'sessions:get')).length)
+    .toBeGreaterThan(loads)
+  await page.waitForTimeout(150)
+  await expect(input).toBeVisible()
+  await expect(input).toHaveValue('Acme pricing kickoff')
+  await input.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Acme pricing kickoff' })).toBeVisible()
+  expect((await calls(ctx.app, 'sessions:rename')).at(-1)?.req).toEqual({
+    id: 's1',
+    title: 'Acme pricing kickoff',
+  })
+  // Not editing: a background change shows up.
+  await changeDetail(ctx.app, 's1', { title: 'Q3 roadmap review: Acme' })
+  await expect(page.getByRole('heading', { name: 'Q3 roadmap review: Acme' })).toBeVisible()
+})
+
 test('session page: action items toggle optimistically and persist', async () => {
   await page.getByRole('tab', { name: /Action items/ }).click()
   const tab = page.getByTestId('actions-tab')
@@ -796,6 +871,37 @@ test('session page: follow-up email autosaves and opens a mail draft', async () 
   await expect.poll(async () => (await calls(ctx.app, 'sessions:openMailDraft')).length).toBe(1)
 })
 
+test('session page: the email tab shows what is stored, and stores what it shows', async () => {
+  const tab = page.getByTestId('email-tab')
+  const subject = tab.getByRole('textbox', { name: 'Subject' })
+  // Main writes a newer email after the user's edit was saved (e.g. generation finished):
+  // the tab must show it, since "Open in mail app" sends the stored one.
+  await changeDetail(ctx.app, 's1', {
+    email: { subject: 'Generated: Q3 next steps', body: 'Hi Dana, here is the recap.' },
+  })
+  await expect(subject).toHaveValue('Generated: Q3 next steps')
+  await expect(tab.getByRole('textbox', { name: 'Message' })).toHaveValue(
+    'Hi Dana, here is the recap.',
+  )
+
+  // Typing and opening the mail app right away stores the typed text first.
+  const before = (await calls(ctx.app, 'sessions:updateEmail')).length
+  await subject.fill('Typed right before opening')
+  await tab.getByRole('button', { name: 'Open in mail app' }).click()
+  await expect.poll(async () => (await calls(ctx.app, 'sessions:openMailDraft')).length).toBe(2)
+  const order = await ctx.app.evaluate(() => {
+    const g = globalThis as unknown as { __calls: { ch: string; req: unknown }[] }
+    return g.__calls
+      .filter((c) => c.ch === 'sessions:updateEmail' || c.ch === 'sessions:openMailDraft')
+      .map((c) => c.ch)
+  })
+  expect(order.slice(before + 1)).toEqual(['sessions:updateEmail', 'sessions:openMailDraft'])
+  expect((await calls(ctx.app, 'sessions:updateEmail')).at(-1)?.req).toMatchObject({
+    id: 's1',
+    subject: 'Typed right before opening',
+  })
+})
+
 test('session page: AI chat shows history and streams new answers', async () => {
   await page.getByRole('tab', { name: 'AI chat' }).click()
   const tab = page.getByTestId('chat-tab')
@@ -813,6 +919,23 @@ test('session page: AI chat shows history and streams new answers', async () => 
     question: 'Are they ready to renew?',
   })
   await bothThemes(page, 'session-chat')
+})
+
+test('session page: switching tabs keeps the unsent question and the transcript filter', async () => {
+  const box = page.getByRole('textbox', { name: 'Ask about this meeting…' })
+  await box.fill('What did they say about the September')
+  await page.getByRole('tab', { name: 'Transcript' }).click()
+  const filter = page.getByRole('textbox', { name: 'Filter transcript' })
+  await expect(filter).toHaveValue('sso')
+  await expect(page.getByTestId('transcript-tab').locator('li')).toHaveCount(2)
+  await page.getByRole('tab', { name: 'Notes' }).click()
+  await page.getByRole('tab', { name: 'AI chat' }).click()
+  await expect(box).toHaveValue('What did they say about the September')
+  await page.getByRole('tab', { name: 'Transcript' }).click()
+  await expect(filter).toHaveValue('sso')
+  await filter.fill('')
+  await page.getByRole('tab', { name: 'AI chat' }).click()
+  await box.fill('')
 })
 
 test('session status banners: recovered, failed and processing', async () => {
@@ -834,6 +957,42 @@ test('session status banners: recovered, failed and processing', async () => {
   await page.getByRole('button', { name: 'Back' }).click()
 })
 
+test('partial post-call failure: per-part messages and Retry regenerates only those parts', async () => {
+  await page.getByRole('button', { name: /^Open Investor update with Lakeside Ventures/ }).click()
+  await changeDetail(ctx.app, 's6', {
+    status: 'done',
+    postCallError: 'notes: The model timed out. · email: Rate limited by the provider.',
+  })
+  const list = page.getByTestId('post-call-errors')
+  await expect(list.locator('li')).toHaveText([
+    'Notes: The model timed out.',
+    'Follow-up email: Rate limited by the provider.',
+  ])
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect
+    .poll(async () => (await calls(ctx.app, 'sessions:regenerate')).at(-1)?.req)
+    .toEqual({ id: 's6', parts: ['notes', 'email'] })
+  await page.getByRole('button', { name: 'Back' }).click()
+})
+
+test('email tab is read-only while the email is still being generated', async () => {
+  await page.getByRole('button', { name: /^Open Customer discovery: Northwind Traders/ }).click()
+  await page.getByRole('tab', { name: 'Follow-up email' }).click()
+  const tab = page.getByTestId('email-tab')
+  const subject = tab.getByRole('textbox', { name: 'Subject' })
+  await expect(tab.getByText('Drafting a follow-up email…')).toBeVisible()
+  await expect(subject).toBeDisabled()
+  await expect(tab.getByRole('textbox', { name: 'Message' })).toBeDisabled()
+  await expect(tab.getByRole('button', { name: 'Open in mail app' })).toBeDisabled()
+  await changeDetail(ctx.app, 's2', {
+    status: 'done',
+    email: { subject: 'Northwind: next steps', body: 'Hi Lee,\n\nThanks for the call.' },
+  })
+  await expect(subject).toBeEnabled()
+  await expect(subject).toHaveValue('Northwind: next steps')
+  await page.getByRole('button', { name: 'Back' }).click()
+})
+
 test('navigate event opens a session (after a call ends)', async () => {
   await push(ctx.app, 'navigate', { name: 'session', sessionId: 's3', tab: 'notes' })
   await expect(page.getByRole('heading', { name: 'Weekly design sync' })).toBeVisible()
@@ -851,6 +1010,29 @@ test('delete from the row menu asks for confirmation', async () => {
   await page.getByRole('button', { name: 'Delete meeting' }).click()
   await expect(row).toHaveCount(0)
   expect((await calls(ctx.app, 'sessions:delete')).at(-1)?.req).toEqual({ id: 's8' })
+})
+
+test('keyboard focus follows navigation: into a meeting, back to its row, after delete', async () => {
+  const rowButton = page.getByRole('button', { name: /^Open Weekly design sync/ })
+  await rowButton.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Weekly design sync' })).toBeFocused()
+  // The next Tab continues inside the meeting page, not at the top of the window.
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('button', { name: 'Weekly design sync' })).toBeFocused()
+  await page.keyboard.press('Alt+ArrowLeft')
+  await expect(page.getByTestId('home-page')).toBeVisible()
+  await expect(rowButton).toBeFocused()
+
+  // Delete from the meeting page: its row is gone, so the home page takes focus.
+  await page.getByRole('button', { name: /^Open Untitled meeting/ }).focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByTestId('session-page')).toBeVisible()
+  await page.getByRole('button', { name: 'Delete meeting' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete meeting' }).click()
+  await expect(page.getByTestId('home-page')).toBeVisible()
+  await expect(page.getByTestId('home-page')).toBeFocused()
+  expect((await calls(ctx.app, 'sessions:delete')).at(-1)?.req).toEqual({ id: 's7' })
 })
 
 test('layout holds at the minimum window size', async () => {
@@ -888,10 +1070,63 @@ test('live session: Start → Stop with timer → Generating notes', async () =>
   await expect(stop).toContainText(/12:3\d/)
   await bothThemes(page, 'home-live')
   await stop.click()
-  await expect(page.getByRole('button', { name: 'Generating notes…' }).first()).toBeDisabled()
+  // While notes are generated the next call can already start.
+  await expect(page.getByTestId('start-processing').first()).toHaveText('Generating notes…')
+  const startNext = page.getByRole('button', { name: 'Start Bluely' }).first()
+  await expect(startNext).toBeEnabled()
   await shot(page, 'home-processing-dark')
+  const starts = (await calls(ctx.app, 'session:start')).length
+  await startNext.click()
+  await expect(page.getByRole('button', { name: /Stop session/ }).first()).toBeVisible()
+  expect((await calls(ctx.app, 'session:start')).length).toBe(starts + 1)
+
+  // A start whose audio never comes up stays 'starting': it must still be stoppable here.
+  await push(ctx.app, 'session:state', { ...IDLE, status: 'starting', sessionId: 'live-2' })
+  const stopStarting = page.getByRole('button', { name: /Stop session/ }).first()
+  await expect(stopStarting).toBeEnabled()
+  await expect(stopStarting).toContainText('Starting…')
+  const stops = (await calls(ctx.app, 'session:stop')).length
+  await stopStarting.click()
+  await expect.poll(async () => (await calls(ctx.app, 'session:stop')).length).toBe(stops + 1)
   await push(ctx.app, 'session:state', { ...IDLE })
   await expect(page.getByRole('button', { name: 'Start Bluely' }).first()).toBeVisible()
+  await expect(page.getByTestId('start-processing')).toHaveCount(0)
+})
+
+test('"Restart & update" asks first while a call is live or notes are being written', async () => {
+  await patchFake(ctx.app, {
+    notices: NOTICES,
+    live: { ...IDLE, status: 'live', sessionId: 'live-3', startedAt: Date.now() - 60_000 },
+  })
+  await page.reload()
+  const install = page.getByRole('button', { name: 'Restart & update' })
+  await install.click()
+  const dialog = page.getByRole('dialog', { name: 'Stop the call and restart?' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(await calls(ctx.app, 'updater:install')).toHaveLength(0)
+
+  await install.click()
+  await dialog.getByRole('button', { name: 'Stop call and restart' }).click()
+  await expect.poll(async () => (await calls(ctx.app, 'updater:install')).length).toBe(1)
+  const order = await ctx.app.evaluate(() => {
+    const g = globalThis as unknown as { __calls: { ch: string }[] }
+    return g.__calls.map((c) => c.ch).filter((c) => c === 'session:stop' || c === 'updater:install')
+  })
+  expect(order.slice(-2)).toEqual(['session:stop', 'updater:install'])
+
+  // The fake stop left the session generating notes: ask again, with the notes wording.
+  await install.click()
+  const notesDialog = page.getByRole('dialog', { name: 'Restart while notes are being written?' })
+  await expect(notesDialog).toBeVisible()
+  await notesDialog.getByRole('button', { name: 'Cancel' }).click()
+
+  // Idle: install right away.
+  await patchFake(ctx.app, { live: IDLE })
+  await install.click()
+  await expect.poll(async () => (await calls(ctx.app, 'updater:install')).length).toBe(2)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
 })
 
 test('settings:open event and the avatar open the Settings slot', async () => {

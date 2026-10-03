@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { AlertCircle, ArrowLeft, SearchX } from 'lucide-react'
 import { t } from '@shared/i18n'
 import type { SessionDetail, SessionTab } from '@shared/types'
@@ -6,10 +6,12 @@ import { Badge, Button, TabList, TabsContent, TabsRoot, type TabItem } from '../
 import { formatClock, formatDay, formatDuration } from '../../lib/format'
 import { errorMessage, invoke } from '../../lib/ipc'
 import { useSessionDetail } from '../hooks/useSessionDetail'
+import { focusPageHeading } from '../lib/focus'
+import type { PostCallPart } from '../lib/postCallError'
 import { useNav } from '../router'
 import { toast } from '../stores/toast'
 import { ActionItemsTab } from '../tabs/ActionItemsTab'
-import { ChatTab } from '../tabs/ChatTab'
+import { ChatTab, type ChatDraft } from '../tabs/ChatTab'
 import { EmailTab } from '../tabs/EmailTab'
 import { NotesTab } from '../tabs/NotesTab'
 import { TranscriptTab } from '../tabs/TranscriptTab'
@@ -59,6 +61,19 @@ export function SessionPage({ sessionId, tab }: { sessionId: string; tab: Sessio
   const nav = useNav()
   const { detail, status, error, patch } = useSessionDetail(sessionId)
   const [regenerating, setRegenerating] = useState(false)
+  // Tab panels unmount when inactive; keep their drafts here so switching tabs loses nothing.
+  const [chatDraft, setChatDraft] = useState<ChatDraft>({ input: '', asked: [] })
+  const [transcriptFilter, setTranscriptFilter] = useState('')
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const focusedOnce = useRef(false)
+
+  // Opening a meeting hides the page that had focus; move focus to this page's heading so
+  // keyboard users continue from here instead of from the top of the window.
+  useEffect(() => {
+    if (status !== 'ready' || focusedOnce.current) return
+    focusedOnce.current = true
+    focusPageHeading(headingRef.current)
+  }, [status])
 
   if (status === 'loading') {
     return (
@@ -111,9 +126,9 @@ export function SessionPage({ sessionId, tab }: { sessionId: string; tab: Sessio
     })
   }
 
-  const regenerate = () => {
+  const regenerate = (parts?: PostCallPart[]) => {
     setRegenerating(true)
-    invoke('sessions:regenerate', { id: detail.id })
+    invoke('sessions:regenerate', { id: detail.id, ...(parts?.length ? { parts } : {}) })
       .then(() => patch((d) => ({ ...d, status: 'processing', postCallError: null })))
       .catch((err: unknown) =>
         toast(`${t('session.banner.regenerateFailed')}: ${errorMessage(err)}`, 'error'),
@@ -150,13 +165,13 @@ export function SessionPage({ sessionId, tab }: { sessionId: string; tab: Sessio
         <div className="mx-auto max-w-[920px] px-10 pt-6">
           <div className="flex items-start gap-4">
             <div className="min-w-0 flex-1">
-              <EditableTitle key={detail.title} title={title} onRename={rename} />
+              <EditableTitle title={title} onRename={rename} headingRef={headingRef} />
               <div className="mt-1">
                 <MetaLine detail={detail} />
               </div>
             </div>
             <div className="pt-1.5">
-              <SessionToolbar id={detail.id} title={title} onDeleted={nav.back} />
+              <SessionToolbar id={detail.id} title={title} onDeleted={nav.backAfterDelete} />
             </div>
           </div>
           <div className="mt-4 empty:hidden">
@@ -167,19 +182,25 @@ export function SessionPage({ sessionId, tab }: { sessionId: string; tab: Sessio
       </div>
       <div className="min-h-0 flex-1">
         <TabsContent value="notes" className="h-full focus-visible:outline-none">
-          {scrolling(<NotesTab detail={detail} title={title} onRegenerate={regenerate} />)}
+          {scrolling(<NotesTab detail={detail} title={title} onRegenerate={() => regenerate()} />)}
         </TabsContent>
         <TabsContent value="actions" className="h-full focus-visible:outline-none">
           {scrolling(<ActionItemsTab detail={detail} patch={patch} />)}
         </TabsContent>
         <TabsContent value="transcript" className="h-full focus-visible:outline-none">
-          {scrolling(<TranscriptTab detail={detail} />)}
+          {scrolling(
+            <TranscriptTab
+              detail={detail}
+              filter={transcriptFilter}
+              setFilter={setTranscriptFilter}
+            />,
+          )}
         </TabsContent>
         <TabsContent value="email" className="h-full focus-visible:outline-none">
           {scrolling(<EmailTab detail={detail} patch={patch} />)}
         </TabsContent>
         <TabsContent value="chat" className="h-full focus-visible:outline-none">
-          <ChatTab sessionId={detail.id} />
+          <ChatTab sessionId={detail.id} draft={chatDraft} setDraft={setChatDraft} />
         </TabsContent>
       </div>
     </TabsRoot>

@@ -6,6 +6,7 @@ export const common = {
   save: 'Save',
   saved: 'Saved',
   close: 'Close',
+  dismiss: 'Dismiss',
   delete: 'Delete',
   edit: 'Edit',
   copy: 'Copy',
@@ -34,5 +35,7 @@ export const common = {
   fast: 'Fast',
   smart: 'Smart',
   unknown: 'Unknown',
+  /** Model price of zero ("free in · $0.40/M out"). */
+  free: 'free',
   notAffiliated: 'Bluely is not affiliated with or endorsed by Cluely.',
 } as const

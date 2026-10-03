@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type Ref } from 'react'
 import { Pencil } from 'lucide-react'
 import { t } from '@shared/i18n'
 
@@ -6,10 +6,17 @@ export interface EditableTitleProps {
   title: string
   /** Called with the trimmed new title; only when it actually changed. */
   onRename(next: string): void
+  /** The page heading; the meeting page moves focus here when it opens. */
+  headingRef?: Ref<HTMLHeadingElement>
 }
 
-/** Meeting title that turns into an input on click. Enter saves, Esc cancels. */
-export function EditableTitle({ title, onRename }: EditableTitleProps) {
+/**
+ * Meeting title that turns into an input on click. Enter saves, Esc cancels.
+ * Keep it mounted across title updates: the stored title can change in the background (notes
+ * finishing name an untitled meeting) and must not discard what is being typed. While editing,
+ * the input only shows the draft; `title` is read again when the edit starts or is committed.
+ */
+export function EditableTitle({ title, onRename, headingRef }: EditableTitleProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(title)
   const cancelled = useRef(false)
@@ -49,7 +56,7 @@ export function EditableTitle({ title, onRename }: EditableTitleProps) {
   }
 
   return (
-    <h1 className="-mx-2 min-w-0">
+    <h1 ref={headingRef} tabIndex={-1} className="-mx-2 min-w-0 outline-none">
       <button
         type="button"
         title={t('session.title.edit')}

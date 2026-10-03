@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo } from 'react'
 import { Filter, MessageSquareText, X } from 'lucide-react'
 import { t } from '@shared/i18n'
 import type { SessionDetail } from '@shared/types'
@@ -8,9 +8,15 @@ import { transcriptStamp, transcriptToText } from '../lib/copyText'
 import { highlightText } from '../lib/snippet'
 import { TabEmpty } from './TabState'
 
+export interface TranscriptTabProps {
+  detail: SessionDetail
+  /** Owned by the meeting page so the filter survives switching tabs. */
+  filter: string
+  setFilter(filter: string): void
+}
+
 /** Timestamped Me/Them transcript with a client-side filter. */
-export function TranscriptTab({ detail }: { detail: SessionDetail }) {
-  const [filter, setFilter] = useState('')
+export function TranscriptTab({ detail, filter, setFilter }: TranscriptTabProps) {
   const deferred = useDeferredValue(filter)
   const lines = detail.transcript
   const needle = deferred.trim().toLowerCase()

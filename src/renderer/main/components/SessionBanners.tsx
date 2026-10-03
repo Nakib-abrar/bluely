@@ -2,6 +2,7 @@ import { RotateCcw, Sparkles } from 'lucide-react'
 import { t } from '@shared/i18n'
 import type { SessionDetail } from '@shared/types'
 import { Banner, Button } from '../../components/ui'
+import { parsePostCallError, type PostCallPart } from '../lib/postCallError'
 
 /** Status banners on the meeting page: processing, recovered, post-call failure. */
 export function SessionBanners({
@@ -10,7 +11,8 @@ export function SessionBanners({
   regenerating,
 }: {
   detail: SessionDetail
-  onRegenerate(): void
+  /** `parts`: only these failed (a partial post-call failure); omitted = whatever is missing. */
+  onRegenerate(parts?: PostCallPart[]): void
   regenerating: boolean
 }) {
   if (detail.status === 'processing') {
@@ -31,7 +33,7 @@ export function SessionBanners({
             variant="secondary"
             icon={<Sparkles size={13} />}
             loading={regenerating}
-            onClick={onRegenerate}
+            onClick={() => onRegenerate()}
           >
             {t('session.banner.generate')}
           </Button>
@@ -42,6 +44,7 @@ export function SessionBanners({
     )
   }
   if (detail.postCallError || detail.status === 'failed') {
+    const failed = parsePostCallError(detail.postCallError)
     return (
       <Banner
         tone="error"
@@ -52,13 +55,26 @@ export function SessionBanners({
             variant="secondary"
             icon={<RotateCcw size={13} />}
             loading={regenerating}
-            onClick={onRegenerate}
+            onClick={() => onRegenerate(failed?.map((f) => f.part))}
           >
             {t('session.banner.retry')}
           </Button>
         }
       >
-        {detail.postCallError}
+        {failed ? (
+          <ul data-testid="post-call-errors">
+            {failed.map((f) => (
+              <li key={f.part}>
+                {t('session.banner.partError', {
+                  part: t(`session.banner.part.${f.part}`),
+                  message: f.message,
+                })}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          detail.postCallError
+        )}
       </Banner>
     )
   }

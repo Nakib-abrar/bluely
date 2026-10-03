@@ -13,6 +13,7 @@ import { useKeyHealth } from './hooks/useKeyHealth'
 import { initLiveSession } from './hooks/useLiveSession'
 import { useMainNav } from './hooks/useMainNav'
 import { useSearch } from './hooks/useSearch'
+import { focusHomeTarget } from './lib/focus'
 import { NavContext } from './router'
 import { Onboarding, SettingsSheet } from './slots'
 
@@ -40,6 +41,16 @@ export function App() {
     searchRef.current?.select()
   }, [])
   useGlobalShortcuts({ focusSearch, back: m.nav.back })
+
+  // Back to the home page: the page that had focus is gone, so return focus to the row of the
+  // meeting the user left (or the page itself). Runs after the home layer became visible.
+  const homeFocus = m.homeFocus
+  const onHome = m.route.name === 'home' && !m.searching
+  useEffect(() => {
+    if (homeFocus && onHome) focusHomeTarget(homeFocus.sessionId)
+    // Only a new request moves focus; later re-renders on the home page must not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeFocus])
 
   const settingsSheet = (
     <SettingsSheet
