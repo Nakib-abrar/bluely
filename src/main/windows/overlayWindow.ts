@@ -42,6 +42,11 @@ export class OverlayController {
   private preferredY: number | null = null
   /** Bounds this controller set last, to tell its own moves from the user's. */
   private appliedBounds: Rectangle | null = null
+  /**
+   * Set while withHidden() keeps a visible overlay hidden for a screenshot. Show / hide / toggle
+   * requests meanwhile change what is restored afterwards instead of the window itself.
+   */
+  private captureHold: CaptureHold | null = null
 
   constructor(private readonly deps: OverlayDeps) {
     this.expanded = deps.settings.get().overlay.expanded
@@ -126,11 +131,22 @@ export class OverlayController {
     return win
   }
 
+  /** Visible as far as the user is concerned (a screenshot hides it only for a moment). */
   isVisible(): boolean {
+    const hold = this.activeHold()
+    if (hold) return hold.restore
     return !!this.window?.isVisible()
   }
 
   show(focus = false): void {
+    const hold = this.activeHold()
+    if (hold) {
+      // Revealed when the screenshot is taken, so it never shows up in it.
+      hold.restore = true
+      hold.focus ||= focus
+      this.emitVisibility()
+      return
+    }
     const win = this.ensure()
     const reveal = () => {
       if (focus) win.show()
@@ -142,7 +158,14 @@ export class OverlayController {
   }
 
   hide(): void {
-    this.window?.hide()
+    const hold = this.activeHold()
+    if (hold) {
+      // Already hidden for a screenshot: stay hidden afterwards.
+      hold.restore = false
+      hold.focus = false
+    } else {
+      this.window?.hide()
+    }
     this.emitVisibility()
   }
 
@@ -153,6 +176,7 @@ export class OverlayController {
   }
 
   focus(): void {
+    if (this.activeHold()) return this.show(true)
     const win = this.ensure()
     const reveal = () => {
       if (!win.isVisible()) win.show()
@@ -198,28 +222,54 @@ export class OverlayController {
   /**
    * Hides the overlay briefly so screenshots never include Bluely itself. A focused overlay
    * (the user is typing a question) gets its focus back: otherwise keystrokes would go to the
-   * window behind it, e.g. the meeting app.
+   * window behind it, e.g. the meeting app. If the user hides the overlay meanwhile (Ctrl+\),
+   * it stays hidden. Overlapping captures share one hold.
    */
   async withHidden<T>(fn: () => Promise<T>, ms: number): Promise<T> {
-    const win = this.window
-    const wasVisible = !!win?.isVisible()
-    const wasFocused = wasVisible && !!win?.isFocused()
-    if (win && wasVisible) {
-      win.hide()
-      await new Promise((r) => setTimeout(r, ms))
+    const held = this.activeHold()
+    if (held) {
+      held.depth++
+      try {
+        return await fn()
+      } finally {
+        this.releaseHold(held)
+      }
     }
+    const win = this.window
+    if (!win || !win.isVisible()) return fn()
+    const hold: CaptureHold = { win, restore: true, focus: win.isFocused(), depth: 1 }
+    this.captureHold = hold
+    win.hide()
     try {
+      await new Promise((r) => setTimeout(r, ms))
       return await fn()
     } finally {
-      if (win && wasVisible && !win.isDestroyed()) {
-        if (wasFocused) {
-          win.show()
-          win.focus()
-          win.webContents.focus()
-        } else {
-          win.showInactive()
-        }
-      }
+      this.releaseHold(hold)
+    }
+  }
+
+  /** The capture hold, if the window it hid is still the overlay. */
+  private activeHold(): CaptureHold | null {
+    const hold = this.captureHold
+    if (!hold) return null
+    if (hold.win.isDestroyed() || hold.win !== this.win) {
+      this.captureHold = null
+      return null
+    }
+    return hold
+  }
+
+  private releaseHold(hold: CaptureHold): void {
+    if (--hold.depth > 0) return
+    if (this.captureHold === hold) this.captureHold = null
+    const { win } = hold
+    if (!hold.restore || win.isDestroyed() || win !== this.win) return
+    if (hold.focus) {
+      win.show()
+      win.focus()
+      win.webContents.focus()
+    } else {
+      win.showInactive()
     }
   }
 
@@ -318,6 +368,16 @@ export class OverlayController {
       expanded: this.expanded,
     })
   }
+}
+
+interface CaptureHold {
+  win: BrowserWindow
+  /** Show the window again afterwards (false once the user hid it meanwhile). */
+  restore: boolean
+  /** Give it the keyboard focus when showing it again. */
+  focus: boolean
+  /** withHidden() calls still running. */
+  depth: number
 }
 
 function sameRect(a: Rectangle, b: Rectangle | null): boolean {

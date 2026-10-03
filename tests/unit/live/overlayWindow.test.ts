@@ -231,6 +231,57 @@ describe('OverlayController: screen capture keeps the focus (F8)', () => {
     expect(win.show).not.toHaveBeenCalled()
     expect(win.focused).toBe(false)
   })
+
+  it('stays hidden when the user hides it while the screenshot is taken (Ctrl+\\)', async () => {
+    const h = setup()
+    h.overlay.focus()
+    const win = h.win()
+    win.show.mockClear()
+    win.showInactive.mockClear()
+    await h.overlay.withHidden(async () => {
+      // Hidden only for the screenshot: to the user (and the toggle) it is still showing.
+      expect(h.overlay.isVisible()).toBe(true)
+      expect(h.overlay.toggle()).toBe(false)
+    }, 0)
+    expect(win.visible).toBe(false)
+    expect(win.show).not.toHaveBeenCalled()
+    expect(win.showInactive).not.toHaveBeenCalled()
+    expect(h.visibility.at(-1)).toMatchObject({ visible: false })
+  })
+
+  it('a show or focus request during the screenshot waits until it is taken', async () => {
+    const h = setup()
+    h.overlay.show(false)
+    const win = h.win()
+    await h.overlay.withHidden(async () => {
+      h.overlay.hide()
+      h.overlay.focus()
+      // Never in the screenshot.
+      expect(win.visible).toBe(false)
+      expect(h.overlay.isVisible()).toBe(true)
+    }, 0)
+    expect(win.visible).toBe(true)
+    expect(win.webContents.focus).toHaveBeenCalled()
+  })
+
+  it('overlapping screenshots show the overlay again only after the last one', async () => {
+    const h = setup()
+    h.overlay.show(false)
+    const win = h.win()
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    const first = h.overlay.withHidden(() => new Promise<void>((r) => (releaseFirst = r)), 0)
+    await new Promise((r) => setTimeout(r, 5))
+    const second = h.overlay.withHidden(() => new Promise<void>((r) => (releaseSecond = r)), 0)
+    await new Promise((r) => setTimeout(r, 5))
+    releaseFirst()
+    await first
+    expect(win.visible).toBe(false)
+    releaseSecond()
+    await second
+    expect(win.visible).toBe(true)
+    expect(win.showInactive).toHaveBeenCalledTimes(2) // the initial show(false), then the restore
+  })
 })
 
 describe('OverlayController: the expanded panel stays on screen (OV-05)', () => {
