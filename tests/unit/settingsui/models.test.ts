@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ModelInfo } from '@shared/types'
+import type { ModelInfo, ModelStat } from '@shared/types'
 import {
   defaultLatencySelection,
   filterModelsForRole,
@@ -12,6 +12,7 @@ import {
   modelMeta,
   parseProviderOrder,
   perMillion,
+  rollingStatRows,
   searchModels,
   shortModelLabel,
 } from '@renderer/settings/lib/models'
@@ -141,5 +142,42 @@ describe('provider order + latency defaults', () => {
   })
   it('defaults the latency test to the three role models, deduped', () => {
     expect(defaultLatencySelection({ fast: 'a', smart: 'b', notes: 'a' })).toEqual(['a', 'b'])
+  })
+})
+
+describe('rollingStatRows', () => {
+  const stat = (model: string, provider: string | null, ttftP50: number): ModelStat => ({
+    model,
+    provider,
+    samples: 5,
+    ttftP50,
+    ttftP90: ttftP50 * 2,
+    totalP50: ttftP50 * 4,
+    tokensPerSecP50: 100,
+    updatedAt: 1,
+  })
+
+  it('gives every (model, provider) row its own key and keeps a model together', () => {
+    // main sends one row per (model, provider), most recently updated first.
+    const rows = rollingStatRows([
+      stat('meta-llama/llama-3.3-70b-instruct', 'Groq', 210),
+      stat('google/gemini-2.5-flash', 'Google AI Studio', 500),
+      stat('meta-llama/llama-3.3-70b-instruct', 'Cerebras', 180),
+      stat('openai/gpt-4o-mini', null, 700),
+    ])
+    const keys = rows.map((r) => r.key)
+    expect(new Set(keys).size).toBe(rows.length)
+    expect(rows.map((r) => [r.model, r.stat.provider])).toEqual([
+      ['meta-llama/llama-3.3-70b-instruct', 'Groq'],
+      ['meta-llama/llama-3.3-70b-instruct', 'Cerebras'],
+      ['google/gemini-2.5-flash', 'Google AI Studio'],
+      ['openai/gpt-4o-mini', null],
+    ])
+    expect(rows[1]?.stat.ttftP50).toBe(180)
+  })
+
+  it('also works with one aggregate row per model', () => {
+    const rows = rollingStatRows([stat('a/x', null, 1), stat('b/y', 'Groq', 2)])
+    expect(rows.map((r) => r.key)).toEqual(['a/x|', 'b/y|Groq'])
   })
 })

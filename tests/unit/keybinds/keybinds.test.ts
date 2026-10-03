@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_KEYBINDS,
+  KEYBIND_DEFS,
+  acceleratorProblem,
   acceleratorToKeys,
   expandAccelerator,
   findConflicts,
@@ -10,6 +12,8 @@ import {
   keyEventToAccelerator,
   keybindDisplay,
   normalizeAccelerator,
+  storedKeybindDisplay,
+  usableAccelerator,
 } from '@shared/keybinds'
 
 const ev = (
@@ -42,6 +46,36 @@ describe('keybinds', () => {
     expect(isValidAccelerator('CommandOrControl', 'arrows4')).toBe(true)
     expect(isValidAccelerator('CommandOrControl+Up', 'arrows4')).toBe(false)
     expect(isValidAccelerator('', 'single')).toBe(false)
+  })
+
+  it('refuses Shift as the only modifier: it would swallow typing or text selection', () => {
+    // Shift+letter / Shift+digit is ordinary typing in every other app.
+    expect(isValidAccelerator('Shift+S', 'single')).toBe(false)
+    expect(isValidAccelerator('shift+1', 'single')).toBe(false)
+    expect(isValidAccelerator('Shift+Enter', 'single')).toBe(false)
+    expect(acceleratorProblem('Shift+S', 'single')).toBe('shiftOnly')
+    // Shift+arrows is text selection.
+    expect(isValidAccelerator('Shift', 'arrows4')).toBe(false)
+    expect(acceleratorProblem('Shift', 'arrows2')).toBe('shiftOnly')
+    // With Ctrl, Alt or Win it is a shortcut; F-keys may go alone or with Shift only.
+    expect(isValidAccelerator('CommandOrControl+Shift+S', 'single')).toBe(true)
+    expect(isValidAccelerator('Alt+Shift+S', 'single')).toBe(true)
+    expect(isValidAccelerator('Super+Shift+S', 'single')).toBe(true)
+    expect(isValidAccelerator('Shift+F7', 'single')).toBe(true)
+    expect(isValidAccelerator('Alt+Shift', 'arrows4')).toBe(true)
+    // Other problems keep their own reason.
+    expect(acceleratorProblem('S', 'single')).toBe('noModifier')
+    expect(acceleratorProblem('Ctrl+Nope', 'single')).toBe('malformed')
+    expect(acceleratorProblem('Ctrl', 'single')).toBe('malformed')
+    expect(acceleratorProblem('', 'arrows4')).toBe('malformed')
+    expect(acceleratorProblem('Ctrl+Up', 'arrows4')).toBe('malformed')
+    expect(acceleratorProblem('CommandOrControl+Enter', 'single')).toBeNull()
+  })
+
+  it('accepts every default bind', () => {
+    for (const def of KEYBIND_DEFS) {
+      expect(isValidAccelerator(def.defaultAccelerator, def.kind), def.id).toBe(true)
+    }
   })
 
   it('expands arrow families', () => {
@@ -102,10 +136,69 @@ describe('keybinds', () => {
     expect(keyEventToAccelerator(ev('a', 'KeyA'), 'arrows4')).toBeNull()
   })
 
+  it('usableAccelerator: what a bind really fires on (null when it does nothing)', () => {
+    // Every default is usable as-is.
+    for (const def of KEYBIND_DEFS) {
+      expect(usableAccelerator(def.id, def.defaultAccelerator), def.id).toBe(
+        normalizeAccelerator(def.defaultAccelerator),
+      )
+    }
+    expect(usableAccelerator('clearChat', 'ctrl+r')).toBe('CommandOrControl+R')
+    expect(usableAccelerator('scrollChat', 'alt+ctrl')).toBe('CommandOrControl+Alt')
+    expect(usableAccelerator('devPanel', 'F9')).toBe('F9')
+    // Disabled.
+    expect(usableAccelerator('clearChat', null)).toBeNull()
+    expect(usableAccelerator('clearChat', undefined)).toBeNull()
+    expect(usableAccelerator('clearChat', '  ')).toBeNull()
+    // Hand-edited values Settings refuses: local binds must not fire on them either.
+    expect(usableAccelerator('clearChat', 'Shift+R')).toBeNull() // capital R while typing
+    expect(usableAccelerator('askAssist', 'Shift+Enter')).toBeNull() // new line while typing
+    expect(usableAccelerator('scrollChat', 'Shift')).toBeNull() // text selection
+    expect(usableAccelerator('devPanel', 'D')).toBeNull()
+    expect(usableAccelerator('devPanel', 'Ctrl+Nope')).toBeNull()
+    // Reserved combos (copy, select all...) never become binds, local or global.
+    expect(usableAccelerator('clearChat', 'Ctrl+C')).toBeNull()
+    expect(usableAccelerator('devPanel', 'ctrl+a')).toBeNull()
+    expect(usableAccelerator('actionRecap', 'Alt+F4')).toBeNull()
+    // Wrong shape for the kind.
+    expect(usableAccelerator('moveOverlay', 'Ctrl+Up')).toBeNull()
+    expect(usableAccelerator('clearChat', 'Ctrl')).toBeNull()
+  })
+
   it('flags reserved combos and formats keycaps', () => {
     expect(isReserved('alt+F4')).toBe(true)
     expect(isReserved('Ctrl+Enter')).toBe(false)
     expect(acceleratorToKeys('CommandOrControl+Enter')).toEqual(['Ctrl', '↵'])
     expect(keybindDisplay('moveOverlay', 'CommandOrControl')).toEqual(['Ctrl', '↑↓←→'])
+  })
+
+  it('keybindDisplay: hints show what a bind fires on, and nothing for an "Invalid shortcut"', () => {
+    // Canonical order, as main registers it.
+    expect(keybindDisplay('askAssist', 'shift+ctrl+enter')).toEqual(['Ctrl', 'Shift', '↵'])
+    expect(keybindDisplay('scrollChat', 'alt+ctrl')).toEqual(['Ctrl', 'Alt', '↑↓'])
+    expect(keybindDisplay('devPanel', 'F9')).toEqual(['F9'])
+    // Hand-edited values main does not register (Settings marks them "Invalid shortcut"): the
+    // overlay's keycap hints must not advertise them.
+    expect(keybindDisplay('clearChat', 'Shift+R')).toEqual([])
+    expect(keybindDisplay('askAssist', 'Shift+Enter')).toEqual([])
+    expect(keybindDisplay('scrollChat', 'Shift')).toEqual([])
+    expect(keybindDisplay('actionSay', 'Shift+1')).toEqual([])
+    expect(keybindDisplay('devPanel', 'Ctrl+C')).toEqual([])
+    expect(keybindDisplay('moveOverlay', 'Ctrl+Up')).toEqual([])
+    expect(keybindDisplay('devPanel', null)).toEqual([])
+    // Settings still shows the stored value as written (dimmed, next to the badge).
+    expect(storedKeybindDisplay('clearChat', 'Shift+R')).toEqual(['Shift', 'R'])
+    expect(storedKeybindDisplay('devPanel', 'Ctrl+C')).toEqual(['Ctrl', 'C'])
+    expect(storedKeybindDisplay('scrollChat', 'Shift')).toEqual(['Shift', '↑↓'])
+    expect(storedKeybindDisplay('devPanel', null)).toEqual([])
+    // One rule: a hint exists exactly when the bind does something.
+    const values = ['Ctrl+R', 'Shift+R', 'Alt', 'Shift', 'Ctrl+C', 'F7', 'R', 'Ctrl+Up', '', null]
+    for (const def of KEYBIND_DEFS) {
+      for (const value of [def.defaultAccelerator, ...values]) {
+        expect(keybindDisplay(def.id, value).length > 0, `${def.id} = ${value}`).toBe(
+          usableAccelerator(def.id, value) !== null,
+        )
+      }
+    }
   })
 })

@@ -18,9 +18,8 @@ import {
   KEYBIND_DEFS,
   expandAccelerator,
   globalsShadowedByLocals,
-  isReserved,
-  isValidAccelerator,
   normalizeAccelerator,
+  usableAccelerator,
   type KeybindDef,
   type KeybindId,
   type KeybindMap,
@@ -54,10 +53,7 @@ export interface ShortcutManagerDeps {
   globalShortcut?: GlobalShortcutApi
 }
 
-/**
- * Status texts shown in Settings › Keybinds.
- * TODO(i18n): "taken", "invalid" and "duplicate" need keys in the keybinds namespace (contract request).
- */
+/** Status texts shown in Settings › Keybinds (one per KeybindStatus reason that is a problem). */
 export const KEYBIND_STATUS_ERRORS = {
   get taken(): string {
     return t('keybinds.taken')
@@ -191,10 +187,9 @@ export class ShortcutManager {
       if (value === null || value.trim() === '') {
         return { def, value: null, state: 'disabled', bindings: [] }
       }
-      if (!isValidAccelerator(value, def.kind) || (def.kind === 'single' && isReserved(value))) {
-        return { def, value, state: 'invalid', bindings: [] }
-      }
-      const normalized = normalizeAccelerator(value)
+      // The same rule the overlay's local keys and Settings use (invalid, Shift only, reserved).
+      const normalized = usableAccelerator(def.id, value)
+      if (normalized === null) return { def, value, state: 'invalid', bindings: [] }
       return {
         def,
         value: normalized,
@@ -302,22 +297,29 @@ export class ShortcutManager {
   private statusFor(p: BindPlan, shadowed: Set<string>, duplicates: Set<string>): KeybindStatus {
     const base = { id: p.def.id, accelerator: p.value }
     if (p.state === 'disabled') {
-      return { ...base, registered: false, error: KEYBIND_STATUS_ERRORS.disabled }
+      return {
+        ...base,
+        registered: false,
+        error: KEYBIND_STATUS_ERRORS.disabled,
+        reason: 'disabled',
+      }
     }
     if (p.state === 'invalid') {
-      return { ...base, registered: false, error: KEYBIND_STATUS_ERRORS.invalid }
+      return { ...base, registered: false, error: KEYBIND_STATUS_ERRORS.invalid, reason: 'invalid' }
     }
     // Local binds are handled by the overlay renderer.
-    if (p.def.scope === 'local') return { ...base, registered: true, error: null }
+    if (p.def.scope === 'local') return { ...base, registered: true, error: null, reason: null }
     // Move-overlay while the overlay is hidden: inactive by design, not an error.
-    if (!this.isActive(p.def.id)) return { ...base, registered: false, error: null }
+    if (!this.isActive(p.def.id)) {
+      return { ...base, registered: false, error: null, reason: 'inactive' }
+    }
 
     let registered = p.bindings.length > 0
-    let error: string | null = null
+    let reason: KeybindStatus['reason'] = null
     for (const b of p.bindings) {
       if (duplicates.has(`${p.def.id}|${b.accelerator}`)) {
         registered = false
-        error ??= KEYBIND_STATUS_ERRORS.duplicate
+        reason ??= 'duplicate'
         continue
       }
       // Suspended while the overlay is focused: report how it was before suspension.
@@ -328,10 +330,14 @@ export class ShortcutManager {
           : (this.lastResult.get(b.accelerator) ?? 'taken')
       if (result === 'ok') continue
       registered = false
-      if (result === 'taken') error = KEYBIND_STATUS_ERRORS.taken
-      else if (result === 'invalid') error ??= KEYBIND_STATUS_ERRORS.invalid
+      // Another app holding the keys is the most actionable problem, so it wins.
+      if (result === 'taken') reason = 'taken'
+      else if (result === 'invalid') reason ??= 'invalid'
     }
-    return { ...base, registered, error }
+    // Not registered without a problem: suspended (focus or capture) before it was ever tried.
+    if (!registered && reason === null) reason = 'inactive'
+    const error = reason === null || reason === 'inactive' ? null : KEYBIND_STATUS_ERRORS[reason]
+    return { ...base, registered, error, reason }
   }
 
   private tryRegister(b: Binding): AttemptResult {

@@ -4,19 +4,22 @@
  */
 import { t, type MessageKey } from '@shared/i18n'
 import {
+  acceleratorProblem,
   acceleratorToKeys,
   findConflicts,
   getKeybindDef,
   isReserved,
-  isValidAccelerator,
   normalizeAccelerator,
+  usableAccelerator,
+  type AcceleratorProblem,
   type KeybindDef,
   type KeybindId,
   type KeybindMap,
 } from '@shared/keybinds'
+import type { KeybindStatus } from '@shared/types'
 
 export type RebindOutcome =
-  | { kind: 'invalid'; accelerator: string }
+  | { kind: 'invalid'; accelerator: string; problem: AcceleratorProblem }
   | { kind: 'reserved'; accelerator: string }
   | { kind: 'conflict'; accelerator: string; other: KeybindId }
   /** Saved, but shares keys with a bind of the other scope (the local one wins while Bluely is focused). */
@@ -29,7 +32,8 @@ export function evaluateRebind(
   accelerator: string,
 ): RebindOutcome {
   const def = getKeybindDef(id)
-  if (!isValidAccelerator(accelerator, def.kind)) return { kind: 'invalid', accelerator }
+  const problem = acceleratorProblem(accelerator, def.kind)
+  if (problem) return { kind: 'invalid', accelerator, problem }
   const normalized = normalizeAccelerator(accelerator)
   if (def.kind === 'single' && isReserved(normalized)) {
     return { kind: 'reserved', accelerator: normalized }
@@ -66,6 +70,15 @@ function keysText(accelerator: string): string {
 export function describeRebindOutcome(def: KeybindDef, outcome: RebindOutcome): RowMessage | null {
   switch (outcome.kind) {
     case 'invalid':
+      if (outcome.problem === 'shiftOnly') {
+        return {
+          tone: 'error',
+          text:
+            def.kind === 'single'
+              ? t('settings.keybinds.errShiftOnly', { keys: keysText(outcome.accelerator) })
+              : t('settings.keybinds.errShiftOnlyArrows'),
+        }
+      }
       return {
         tone: 'error',
         text:
@@ -91,6 +104,50 @@ export function describeRebindOutcome(def: KeybindDef, outcome: RebindOutcome): 
         tone: 'info',
         text: t('settings.keybinds.infoFocusOnly', { other: labelOf(outcome.other) }),
       }
+    default:
+      return null
+  }
+}
+
+export interface KeybindBadge {
+  tone: 'neutral' | 'warning' | 'danger'
+  text: string
+}
+
+/**
+ * The status badge of a Settings › Keybinds row. Only problems main actually reports are shown:
+ * a bind that is not registered on purpose (Move Bluely while the overlay is hidden, globals
+ * suspended while recording) carries reason 'inactive' and gets no badge.
+ */
+export function keybindBadge(
+  def: KeybindDef,
+  value: string | null,
+  status: KeybindStatus | undefined,
+): KeybindBadge | null {
+  if (value == null) return { tone: 'neutral', text: t('settings.keybinds.disabled') }
+  // Unusable values (including reserved ones like Ctrl+C) do nothing anywhere: say so before
+  // main's status arrives.
+  if (usableAccelerator(def.id, value) === null) {
+    return { tone: 'danger', text: t('settings.keybinds.invalid') }
+  }
+  // A status for another accelerator is stale (main has not applied the new value yet).
+  if (
+    !status ||
+    status.accelerator == null ||
+    normalizeAccelerator(status.accelerator) !== normalizeAccelerator(value)
+  ) {
+    return null
+  }
+  switch (status.reason) {
+    case 'taken':
+      return { tone: 'warning', text: t('settings.keybinds.taken') }
+    case 'duplicate':
+      return { tone: 'warning', text: t('keybinds.duplicate') }
+    case 'invalid':
+      return { tone: 'danger', text: t('settings.keybinds.invalid') }
+    case undefined:
+      // `reason` is optional in the contract: trust only an explicit error message then.
+      return !status.registered && status.error ? { tone: 'warning', text: status.error } : null
     default:
       return null
   }

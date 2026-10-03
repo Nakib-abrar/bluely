@@ -2,7 +2,7 @@
  * Pure helpers for the AI Models page and model pickers (unit-tested in tests/unit/settingsui).
  */
 import { t } from '@shared/i18n'
-import type { ModelInfo, ModelRole } from '@shared/types'
+import type { ModelInfo, ModelRole, ModelStat } from '@shared/types'
 import { formatPerMillion } from '../../lib/format'
 
 /** Picker roles: the three chat roles plus speech-to-text. */
@@ -125,4 +125,27 @@ export function formatBytes(bytes: number): string {
 /** Default latency-test selection: the three chat role models, deduped, in role order. */
 export function defaultLatencySelection(models: { fast: string; smart: string; notes: string }) {
   return [...new Set([models.fast, models.smart, models.notes])]
+}
+
+/** One row of the rolling-average table, with a React key that is unique per row. */
+export interface RollingStatRow {
+  key: string
+  model: string
+  stat: ModelStat
+}
+
+/**
+ * Rows for the rolling-average table. main keeps one rolling window per (model, provider), so a
+ * model routed to several providers yields several rows: each gets a unique key (keying by model
+ * alone collides and lets React reuse the wrong row), and a model's rows stay together, in the
+ * order main sent them (most recently updated first).
+ */
+export function rollingStatRows(stats: readonly ModelStat[]): RollingStatRow[] {
+  const byModel = new Map<string, ModelStat[]>()
+  for (const s of stats) byModel.set(s.model, [...(byModel.get(s.model) ?? []), s])
+  return [...byModel.values()].flat().map((stat) => ({
+    key: `${stat.model}|${stat.provider ?? ''}`,
+    model: stat.model,
+    stat,
+  }))
 }

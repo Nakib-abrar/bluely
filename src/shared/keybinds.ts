@@ -155,14 +155,29 @@ export function acceleratorToKeys(accelerator: string): string[] {
     .map((p) => KEY_DISPLAY[p] ?? p)
 }
 
-/** Display keycaps for a keybind, including the arrow family suffix. */
-export function keybindDisplay(id: KeybindId, accelerator: string | null): string[] {
-  if (!accelerator) return []
+/**
+ * Keycaps for a stored keybind value as written, including the arrow family suffix, even when the
+ * value does nothing. Only for Settings › Keybinds, which shows such a value dimmed next to
+ * "Invalid shortcut"; hints elsewhere use keybindDisplay.
+ */
+export function storedKeybindDisplay(id: KeybindId, value: string | null | undefined): string[] {
+  if (!value) return []
   const def = getKeybindDef(id)
-  const keys = acceleratorToKeys(accelerator)
+  const keys = acceleratorToKeys(value)
   if (def.kind === 'arrows4') return [...keys, '↑↓←→']
   if (def.kind === 'arrows2') return [...keys, '↑↓']
   return keys
+}
+
+/**
+ * Keycap hints for what a keybind really fires on (canonical order, arrow family suffix
+ * included), or none when it does nothing: disabled, unusable or reserved (see
+ * usableAccelerator). So the overlay's hints never advertise a hand-edited Shift+R or Ctrl+C
+ * that main does not register and Settings marks "Invalid shortcut".
+ */
+export function keybindDisplay(id: KeybindId, value: string | null | undefined): string[] {
+  const usable = usableAccelerator(id, value)
+  return usable === null ? [] : storedKeybindDisplay(id, usable)
 }
 
 // ───────────────────────── accelerator logic (pure; used by main + Settings) ─────────────────────────
@@ -279,16 +294,40 @@ export function normalizeAccelerator(acc: string): string {
 }
 
 /**
- * Validates an accelerator for a keybind kind. Global single binds need at least one modifier
- * (except F-keys). Arrow families store only the modifier prefix.
+ * Why an accelerator cannot be used for a keybind kind:
+ * - 'malformed': unknown key names, two keys, or (for single binds) no key at all.
+ * - 'noModifier': a key without any modifier (only F-keys may stand alone).
+ * - 'shiftOnly': Shift is the only modifier. Shift+letter/digit is ordinary typing and
+ *   Shift+arrows is text selection, so binding it would swallow those keystrokes in every app.
+ */
+export type AcceleratorProblem = 'malformed' | 'noModifier' | 'shiftOnly'
+
+/** Modifiers that make a combination a shortcut rather than typing (Ctrl, Alt, AltGr, Win). */
+const SHORTCUT_MODIFIERS = new Set(['CommandOrControl', 'Alt', 'AltGr', 'Super'])
+
+/** The reason `acc` is not a usable accelerator for `kind`, or null when it is fine. */
+export function acceleratorProblem(acc: string, kind: KeybindKind): AcceleratorProblem | null {
+  const p = parseAccelerator(acc)
+  if (!p.valid) return 'malformed'
+  if (kind === 'arrows4' || kind === 'arrows2') {
+    // Arrow families store only the modifier prefix; the arrows are appended later.
+    if (p.key !== null) return 'malformed'
+  } else {
+    if (!p.key) return 'malformed'
+    // F-keys are not typed characters, so they may be used alone or with Shift only.
+    if (/^F\d+$/.test(p.key)) return null
+  }
+  if (p.modifiers.length === 0) return 'noModifier'
+  if (!p.modifiers.some((m) => SHORTCUT_MODIFIERS.has(m))) return 'shiftOnly'
+  return null
+}
+
+/**
+ * Validates an accelerator for a keybind kind. Binds need Ctrl, Alt or Win (Shift alone is
+ * typing); F-keys may stand alone. Arrow families store only the modifier prefix.
  */
 export function isValidAccelerator(acc: string, kind: KeybindKind): boolean {
-  const p = parseAccelerator(acc)
-  if (!p.valid) return false
-  if (kind === 'arrows4' || kind === 'arrows2') return p.key === null && p.modifiers.length > 0
-  if (!p.key) return false
-  const isFKey = /^F\d+$/.test(p.key)
-  return p.modifiers.length > 0 || isFKey
+  return acceleratorProblem(acc, kind) === null
 }
 
 /** All concrete accelerators a keybind registers (arrow families expand to their arrow keys). */
@@ -370,6 +409,22 @@ export const RESERVED_ACCELERATORS = [
 
 export function isReserved(acc: string): boolean {
   return RESERVED_ACCELERATORS.includes(normalizeAccelerator(acc))
+}
+
+/**
+ * The accelerator a keybind really uses (normalized; the modifier prefix for arrow families), or
+ * null when the bind does nothing: disabled, unusable for its kind (malformed, no modifier, Shift
+ * only) or reserved. Main registers only these and reports the rest as "Invalid shortcut", so
+ * everything else that reacts to binds (the overlay's local keys) must go through this too:
+ * otherwise a hand-edited Shift+S or Ctrl+C would still fire there.
+ */
+export function usableAccelerator(id: KeybindId, value: string | null | undefined): string | null {
+  if (value == null || value.trim() === '') return null
+  const def = getKeybindDef(id)
+  if (!isValidAccelerator(value, def.kind)) return null
+  const normalized = normalizeAccelerator(value)
+  if (def.kind === 'single' && isReserved(normalized)) return null
+  return normalized
 }
 
 export interface KeyEventLike {

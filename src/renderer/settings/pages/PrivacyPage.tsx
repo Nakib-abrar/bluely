@@ -1,11 +1,12 @@
 import { Camera, Clock, FileDown, FolderOpen, HardDrive, ShieldCheck, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { REPO_URL } from '@shared/constants'
 import { t } from '@shared/i18n'
 import type { Settings } from '@shared/settings'
 import {
   Button,
   Card,
+  ConfirmDialog,
   Dialog,
   Input,
   Select,
@@ -19,8 +20,13 @@ import { useSettings } from '../../stores/settings'
 import { ExternalLinkButton, PageHeader, StatusLine } from '../components/bits'
 import { useAppInfo } from '../hooks'
 import { describeError } from '../lib/errors'
+import {
+  countSessionsBefore,
+  isShorterRetention,
+  retentionCutoff,
+  type RetentionDays as Retention,
+} from '../lib/retention'
 
-type Retention = Settings['privacy']['retentionDays']
 const RETENTION_VALUES: Retention[] = [0, 30, 90, 365]
 const CONFIRM_WORD = 'DELETE'
 
@@ -116,12 +122,51 @@ export function PrivacyPage() {
   const [deleteResult, setDeleteResult] = useState<Result>(null)
   const [folderError, setFolderError] = useState<string | null>(null)
 
+  // A shorter retention deletes meetings as soon as it is saved: confirm with the count first.
+  const [retentionAsk, setRetentionAsk] = useState<{
+    days: Retention
+    /** null when the count could not be computed. */
+    count: number | null
+  } | null>(null)
+  const [checkingRetention, setCheckingRetention] = useState(false)
+  const retentionRequest = useRef(0)
+
   const save = (patch: Partial<Settings['privacy']>) =>
     void update({ privacy: patch })
       .then(() => setSaveError(null))
       .catch((err: unknown) =>
         setSaveError(t('settings.saveFailed', { error: describeError(err) })),
       )
+
+  const chooseRetention = async (days: Retention) => {
+    const request = ++retentionRequest.current
+    setCheckingRetention(false)
+    if (days === privacy.retentionDays) return
+    if (!isShorterRetention(privacy.retentionDays, days)) {
+      save({ retentionDays: days })
+      return
+    }
+    setCheckingRetention(true)
+    let count: number | null
+    try {
+      count = await countSessionsBefore(retentionCutoff(days, Date.now()), (before, limit) =>
+        invoke('sessions:list', { before, limit }),
+      )
+    } catch {
+      count = null
+    }
+    if (request !== retentionRequest.current) return
+    setCheckingRetention(false)
+    if (count === 0) save({ retentionDays: days })
+    else setRetentionAsk({ days, count })
+  }
+
+  const retentionWarning = (ask: { days: Retention; count: number | null }) =>
+    ask.count == null
+      ? t('settings.privacy.retentionConfirmUnknown', { days: ask.days })
+      : ask.count === 1
+        ? t('settings.privacy.retentionConfirmOne', { days: ask.days })
+        : t('settings.privacy.retentionConfirmMany', { days: ask.days, count: ask.count })
 
   const retentionOptions: SelectOption<string>[] = RETENTION_VALUES.map((d) => ({
     value: String(d),
@@ -189,10 +234,11 @@ export function PrivacyPage() {
               value={String(privacy.retentionDays)}
               onValueChange={(v) => {
                 const days = Number(v) as Retention
-                if (RETENTION_VALUES.includes(days)) save({ retentionDays: days })
+                if (RETENTION_VALUES.includes(days)) void chooseRetention(days)
               }}
               options={retentionOptions}
               label={t('settings.privacy.retentionTitle')}
+              disabled={checkingRetention}
               className="w-[150px]"
             />
           }
@@ -286,6 +332,21 @@ export function PrivacyPage() {
           </div>
         </Card>
       </SettingsSection>
+
+      <ConfirmDialog
+        open={retentionAsk != null}
+        onOpenChange={(open) => {
+          if (!open) setRetentionAsk(null)
+        }}
+        title={t('settings.privacy.retentionConfirmTitle', { days: retentionAsk?.days ?? 0 })}
+        description={retentionAsk ? retentionWarning(retentionAsk) : undefined}
+        confirmLabel={t('settings.privacy.retentionConfirm')}
+        danger
+        onConfirm={() => {
+          if (retentionAsk) save({ retentionDays: retentionAsk.days })
+          setRetentionAsk(null)
+        }}
+      />
 
       <DeleteAllDialog
         open={deleteOpen}

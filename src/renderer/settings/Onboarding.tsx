@@ -9,8 +9,8 @@ import { t } from '@shared/i18n'
 import {
   ALT_ENTER_PRESET,
   getKeybindDef,
-  keybindDisplay,
   normalizeAccelerator,
+  storedKeybindDisplay,
 } from '@shared/keybinds'
 import type { Mode } from '@shared/types'
 import { Button, Card, cn, Input, Keys, LogoMark } from '../components/ui'
@@ -141,7 +141,7 @@ function AudioStep() {
               {applied
                 ? t('onboarding.audio.askBodyApplied')
                 : t('onboarding.audio.askBody', {
-                    keys: keybindDisplay(
+                    keys: storedKeybindDisplay(
                       'askAssist',
                       keybinds.askAssist ?? 'CommandOrControl+Enter',
                     )

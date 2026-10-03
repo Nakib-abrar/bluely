@@ -38,6 +38,7 @@ import {
   modelLabel,
   modelMeta,
   parseProviderOrder,
+  rollingStatRows,
   shortModelLabel,
   type PickerRole,
 } from '../lib/models'
@@ -231,43 +232,50 @@ function RoleCard({
 }
 
 interface StatRow {
+  /** Unique per row: the model alone repeats when main reports one row per provider. */
+  key: string
   model: string
   stat: ModelStat | null
   progress?: { completed: number; total: number } | null
   errors?: string[]
 }
 
+/*
+ * Below 584 px (the default window on 1366×768, or 1920×1080 at 150 %) the table drops the
+ * Provider and Runs columns and shows the provider under the model name instead, so the model
+ * column keeps room for a readable name.
+ */
+const wide = '@max-[584px]:hidden'
+/** tok/s is the last visible column of the narrow layout when there is no Errors column. */
+const lastWhenNarrow = '@max-[584px]:w-[56px] @max-[584px]:pr-3'
+
 function StatsTable({ rows, showErrors }: { rows: StatRow[]; showErrors?: boolean }) {
   const models = useModelCatalog((s) => s.models)
   const head = 'py-2 px-1.5 text-[11.5px] font-medium text-subtle whitespace-nowrap'
   const num = 'py-2 px-1.5 text-right tabular whitespace-nowrap'
   return (
-    <div className="overflow-hidden rounded-xl border border-line">
+    <div className="@container overflow-hidden rounded-xl border border-line">
       {/* Fixed layout keeps the numbers aligned and lets long model names truncate. */}
       <table className="w-full table-fixed border-collapse text-[12.5px]">
-        <colgroup>
-          <col />
-          <col className="w-[66px]" />
-          <col className="w-[66px]" />
-          <col className="w-[66px]" />
-          <col className="w-[44px]" />
-          <col className="w-[92px]" />
-          <col className="w-[44px]" />
-          {showErrors ? <col className="w-[52px]" /> : null}
-        </colgroup>
         <thead className="bg-panel-2">
           <tr className="border-b border-line">
             <th className={cn(head, 'pl-3 text-left')}>{t('settings.models.colModel')}</th>
-            <th className={cn(head, 'text-right')}>{t('settings.models.colTtftP50')}</th>
-            <th className={cn(head, 'text-right')}>{t('settings.models.colTtftP90')}</th>
-            <th className={cn(head, 'text-right')}>{t('settings.models.colTotalP50')}</th>
-            <th className={cn(head, 'text-right')}>{t('settings.models.colTokPerSec')}</th>
-            <th className={cn(head, 'pl-3 text-left')}>{t('settings.models.colProvider')}</th>
-            <th className={cn(head, 'text-right', !showErrors && 'pr-3')}>
+            <th className={cn(head, 'w-[66px] text-right')}>{t('settings.models.colTtftP50')}</th>
+            <th className={cn(head, 'w-[66px] text-right')}>{t('settings.models.colTtftP90')}</th>
+            <th className={cn(head, 'w-[66px] text-right')}>{t('settings.models.colTotalP50')}</th>
+            <th className={cn(head, 'w-[44px] text-right', !showErrors && lastWhenNarrow)}>
+              {t('settings.models.colTokPerSec')}
+            </th>
+            <th className={cn(head, wide, 'w-[84px] pl-3 text-left')}>
+              {t('settings.models.colProvider')}
+            </th>
+            <th className={cn(head, wide, 'w-[44px] text-right', !showErrors && 'pr-3')}>
               {t('settings.models.colSamples')}
             </th>
             {showErrors ? (
-              <th className={cn(head, 'pr-3 text-right')}>{t('settings.models.colErrors')}</th>
+              <th className={cn(head, 'w-[52px] pr-3 text-right')}>
+                {t('settings.models.colErrors')}
+              </th>
             ) : null}
           </tr>
         </thead>
@@ -276,37 +284,49 @@ function StatsTable({ rows, showErrors }: { rows: StatRow[]; showErrors?: boolea
             const s = row.stat
             const running = row.progress && !s
             return (
-              <tr key={row.model} className="border-b border-line last:border-b-0">
+              <tr key={row.key} className="border-b border-line last:border-b-0">
                 <td className="truncate py-2 pr-2 pl-3 text-left" title={row.model}>
-                  <span className="font-medium text-fg">{shortModelLabel(models, row.model)}</span>
+                  <span className="font-medium text-fg" data-testid="stat-model">
+                    {shortModelLabel(models, row.model)}
+                  </span>
+                  {s?.provider ? (
+                    <span className="hidden truncate text-[11.5px] text-muted @max-[584px]:block">
+                      {s.provider}
+                    </span>
+                  ) : null}
                 </td>
                 {running ? (
-                  <td colSpan={6} className="px-1.5 py-2 text-left text-muted">
-                    <span className="inline-flex items-center gap-2">
-                      <Spinner size={12} className="text-accent-text" />
-                      <span className="tabular">
-                        {t('settings.models.progress', {
-                          done: row.progress?.completed ?? 0,
-                          total: row.progress?.total ?? LATENCY_RUNS,
-                        })}
+                  <>
+                    {/* Spans the four number columns; the optional ones stay separate cells. */}
+                    <td colSpan={4} className="px-1.5 py-2 text-left text-muted">
+                      <span className="inline-flex items-center gap-2">
+                        <Spinner size={12} className="text-accent-text" />
+                        <span className="tabular">
+                          {t('settings.models.progress', {
+                            done: row.progress?.completed ?? 0,
+                            total: row.progress?.total ?? LATENCY_RUNS,
+                          })}
+                        </span>
                       </span>
-                    </span>
-                  </td>
+                    </td>
+                    <td className={wide} />
+                    <td className={wide} />
+                  </>
                 ) : (
                   <>
                     <td className={cn(num, 'font-medium text-fg')}>{formatMs(s?.ttftP50)}</td>
                     <td className={cn(num, 'text-muted')}>{formatMs(s?.ttftP90)}</td>
                     <td className={cn(num, 'text-muted')}>{formatMs(s?.totalP50)}</td>
-                    <td className={cn(num, 'text-muted')}>
+                    <td className={cn(num, 'text-muted', !showErrors && lastWhenNarrow)}>
                       {s?.tokensPerSecP50 != null ? Math.round(s.tokensPerSecP50) : '—'}
                     </td>
                     <td
-                      className="truncate py-2 pr-1.5 pl-3 text-left text-muted"
+                      className={cn('truncate py-2 pr-1.5 pl-3 text-left text-muted', wide)}
                       title={s?.provider ?? undefined}
                     >
                       {s?.provider ?? '—'}
                     </td>
-                    <td className={cn(num, 'text-muted', !showErrors && 'pr-3')}>
+                    <td className={cn(num, 'text-muted', wide, !showErrors && 'pr-3')}>
                       {s?.samples ?? '—'}
                     </td>
                   </>
@@ -392,6 +412,7 @@ function LatencySection({ onFinished }: { onFinished: () => void }) {
   const rows: StatRow[] = (testedModels.length && runId ? testedModels : selected).map((model) => {
     const p = runId ? progress[model] : undefined
     return {
+      key: model,
       model,
       stat: p?.result ?? null,
       progress: running ? { completed: p?.completed ?? 0, total: p?.total ?? LATENCY_RUNS } : null,
@@ -484,7 +505,7 @@ function RollingSection({ stats, error }: { stats: ModelStat[] | null; error: st
         {error ? (
           <StatusLine tone="error">{error}</StatusLine>
         ) : stats && stats.length ? (
-          <StatsTable rows={stats.map((s) => ({ model: s.model, stat: s }))} />
+          <StatsTable rows={rollingStatRows(stats)} />
         ) : (
           <p className="text-[12.5px] text-subtle">{t('settings.models.rollingEmpty')}</p>
         )}

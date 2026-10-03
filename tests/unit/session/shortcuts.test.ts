@@ -3,6 +3,7 @@ import { openDatabase } from '@main/db/database'
 import { SettingsStore } from '@main/settings/settingsStore'
 import { KEYBIND_STATUS_ERRORS, ShortcutManager, type ShortcutActions } from '@main/shortcuts'
 import type { EventChannel, EventPayload } from '@shared/ipc'
+import { DEFAULT_KEYBINDS, KEYBIND_DEFS, usableAccelerator } from '@shared/keybinds'
 import type { KeybindStatus } from '@shared/types'
 import { FakeGlobalShortcut, fakeLogger } from './fakes'
 
@@ -63,10 +64,16 @@ describe('ShortcutManager', () => {
     ])
     for (const s of status) {
       if (s.id === 'moveOverlay') {
-        // Inactive while the overlay is hidden: not an error.
-        expect(s).toEqual({ id: s.id, accelerator: CTRL, registered: false, error: null })
+        // Inactive while the overlay is hidden: not an error, and says so explicitly.
+        expect(s).toEqual({
+          id: s.id,
+          accelerator: CTRL,
+          registered: false,
+          error: null,
+          reason: 'inactive',
+        })
       } else {
-        expect(s).toMatchObject({ registered: true, error: null })
+        expect(s).toMatchObject({ registered: true, error: null, reason: null })
       }
     }
     expect(status.find((s) => s.id === 'clearChat')?.accelerator).toBe(`${CTRL}+R`)
@@ -90,6 +97,7 @@ describe('ShortcutManager', () => {
       accelerator: `${CTRL}+Enter`,
       registered: false,
       error: KEYBIND_STATUS_ERRORS.taken,
+      reason: 'taken',
     })
     expect(KEYBIND_STATUS_ERRORS.taken).toBe('Taken by another app')
     expect(statusOf('toggleOverlay')).toMatchObject({ registered: true, error: null })
@@ -110,6 +118,7 @@ describe('ShortcutManager', () => {
     expect(statusOf('actionFollowups')).toMatchObject({
       registered: false,
       error: KEYBIND_STATUS_ERRORS.invalid,
+      reason: 'invalid',
     })
     expect(KEYBIND_STATUS_ERRORS.invalid).toBe('Invalid shortcut')
 
@@ -121,6 +130,7 @@ describe('ShortcutManager', () => {
       accelerator: 'Enter',
       registered: false,
       error: 'Invalid shortcut',
+      reason: 'invalid',
     })
     // Never steal copy/paste system-wide.
     expect(statusOf('actionRecap')).toMatchObject({ registered: false, error: 'Invalid shortcut' })
@@ -138,8 +148,45 @@ describe('ShortcutManager', () => {
       accelerator: null,
       registered: false,
       error: 'Disabled',
+      reason: 'disabled',
     })
     expect(statusOf('devPanel')).toMatchObject({ registered: false, error: 'Disabled' })
+  })
+
+  it('refuses Shift-only shortcuts, which would swallow typing or text selection', () => {
+    const { gs, settings, manager, statusOf } = setup()
+    settings.update({
+      keybinds: { actionSay: 'Shift+S', actionFollowups: 'shift+1', moveOverlay: 'Shift' },
+    })
+    manager.setOverlayVisible(true)
+    for (const id of ['actionSay', 'actionFollowups', 'moveOverlay']) {
+      expect(statusOf(id)).toMatchObject({
+        registered: false,
+        error: KEYBIND_STATUS_ERRORS.invalid,
+        reason: 'invalid',
+      })
+    }
+    expect(gs.registered().filter((a) => a.startsWith('Shift+'))).toEqual([])
+    // Shift with Ctrl/Alt, or on an F-key, is still fine.
+    settings.update({ keybinds: { actionSay: 'Alt+Shift+S', actionFollowups: 'Shift+F7' } })
+    expect(gs.registered()).toEqual(expect.arrayContaining(['Alt+Shift+S', 'Shift+F7']))
+    expect(statusOf('actionFollowups')).toMatchObject({ registered: true, reason: null })
+  })
+
+  it('treats a bind as invalid exactly when usableAccelerator says it does nothing', () => {
+    // Main and the overlay's local keys share this rule, so a bind never fires in one place
+    // while Settings reports it invalid.
+    const values = ['Shift+S', 'Ctrl+C', 'Alt+F4', 'Ctrl+Nope', 'D', 'F9', 'Ctrl+Alt+K']
+    const prefixes = ['Shift', 'Ctrl+Up', 'Alt', 'Ctrl+Alt']
+    const { settings, manager, statusOf } = setup()
+    manager.setOverlayVisible(true)
+    for (const def of KEYBIND_DEFS) {
+      for (const value of def.kind === 'single' ? values : prefixes) {
+        settings.update({ keybinds: { ...DEFAULT_KEYBINDS, [def.id]: value } })
+        const invalid = statusOf(def.id)?.reason === 'invalid'
+        expect(invalid, `${def.id} = ${value}`).toBe(usableAccelerator(def.id, value) === null)
+      }
+    }
   })
 
   it('registers move-overlay arrows only while the overlay is visible', () => {
@@ -148,7 +195,7 @@ describe('ShortcutManager', () => {
 
     manager.setOverlayVisible(true)
     expect(gs.registered()).toEqual([...DEFAULT_GLOBALS, ...ARROWS_SMALL, ...ARROWS_LARGE].sort())
-    expect(statusOf('moveOverlay')).toMatchObject({ registered: true, error: null })
+    expect(statusOf('moveOverlay')).toMatchObject({ registered: true, error: null, reason: null })
 
     gs.press(`${CTRL}+Left`)
     gs.press(`${CTRL}+Up`)
@@ -163,7 +210,11 @@ describe('ShortcutManager', () => {
 
     manager.setOverlayVisible(false)
     expect(gs.registered()).toEqual(DEFAULT_GLOBALS)
-    expect(statusOf('moveOverlay')).toMatchObject({ registered: false, error: null })
+    expect(statusOf('moveOverlay')).toMatchObject({
+      registered: false,
+      error: null,
+      reason: 'inactive',
+    })
   })
 
   it('uses the small step only when the move base already contains Shift', () => {
@@ -247,6 +298,7 @@ describe('ShortcutManager', () => {
     expect(statusOf('actionFollowups')).toMatchObject({
       registered: false,
       error: KEYBIND_STATUS_ERRORS.duplicate,
+      reason: 'duplicate',
     })
     expect(gs.registered()).not.toContain(`${CTRL}+Shift+2`)
   })
