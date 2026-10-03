@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { onboarding } from '@shared/i18n/en/onboarding'
 import { settings } from '@shared/i18n/en/settings'
+import { STARTUP_RECORD_FILE } from '@main/platform/win32'
 import { loadYaml, yamlVersion } from './yaml'
 
 /**
@@ -86,18 +87,26 @@ describe('Settings page names in the docs', () => {
       (f) => /\.tsx?$/.test(f),
     )
     expect(files.length).toBeGreaterThan(50)
+    // Words may be wrapped over comment lines: whitespace and comment markers between them.
+    const gap = String.raw`(?:\s|\*(?!\/)|\/\/)+`
+    const page = new RegExp(
+      `(Windows${gap})?Settings${gap}›${gap}Privacy(?!${gap}&${gap}Data)`,
+      'g',
+    )
     const stale: string[] = []
     for (const file of files) {
-      // Comment markers dropped and whitespace collapsed, so a phrase wrapped over lines matches.
       const text = read('src', file)
-        .replace(/\n\s*(?:\*(?!\/)|\/\/)?/g, ' ')
-        .replace(/\s+/g, ' ')
-      for (const m of text.matchAll(/(Windows )?Settings › Privacy(?! & Data)/g)) {
-        if (!m[1]) stale.push(file) // Windows' own Settings › Privacy & security is fine
+      for (const m of text.matchAll(page)) {
+        if (m[1]) continue // Windows' own Settings › Privacy & security is fine
+        const line = text.slice(0, m.index).split('\n').length
+        stale.push(`src/${file.replaceAll('\\', '/')}:${line}`)
       }
     }
     expect(settings.nav.privacy).toBe('Privacy & Data')
-    expect(stale).toEqual([])
+    expect(
+      stale,
+      'Old page name in a comment: write "Settings › Privacy & Data ›" (settings.nav.privacy)',
+    ).toEqual([])
   })
 })
 
@@ -132,6 +141,14 @@ describe('installer', () => {
     const architecture = flat(read('docs', 'ARCHITECTURE.md'))
     expect(architecture).not.toContain('per-user, no admin')
     expect(architecture).toContain('"anyone who uses this computer" (elevates')
+  })
+})
+
+describe('PRIVACY.md: what is stored', () => {
+  it('lists the launch-at-startup record next to the other files in %APPDATA%\\Bluely', () => {
+    const stored = section(privacy, '## What is stored, and where')
+    const row = stored.split('\n').find((l) => l.startsWith(`| \`${STARTUP_RECORD_FILE}\``))
+    expect(row).toMatch(/Launch at startup/)
   })
 })
 

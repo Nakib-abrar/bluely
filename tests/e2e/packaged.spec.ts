@@ -5,7 +5,11 @@
  * `pnpm dist:dir` (CI: .github/workflows/loopback-windows.yml).
  *
  * A packaged build ignores the test overrides (data folder, API host), so this uses the real
- * data folder of the account running it and only calls read-only/local APIs.
+ * data folder of the account running it and only calls read-only/local APIs. One side effect
+ * on Windows: like every start of a packaged build, it re-syncs the launch-at-startup entry
+ * (HKCU\...\Run) with that account's setting. An entry for another copy of Bluely that still
+ * exists (e.g. the installed app) is left alone; with the setting on and no entry (or one for a
+ * deleted exe), this exe is registered. See syncLaunchAtStartup in src/main/platform/win32.
  */
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 import type { AppInfo } from '@shared/types'

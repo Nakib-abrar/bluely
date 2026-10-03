@@ -369,6 +369,8 @@ export interface AppInfo {
   arch: string
   isPackaged: boolean
   isPortable: boolean
+  /** False where the Launch at startup toggle cannot work (e.g. not Windows); it is disabled. */
+  canLaunchAtStartup: boolean
   dataDir: string
   devMode: boolean
 }

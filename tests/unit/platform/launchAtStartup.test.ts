@@ -1,13 +1,16 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CoreContext } from '@main/context'
+import type { AppInfo } from '@shared/types'
 
 interface LoginItemSettings {
   openAtLogin?: boolean
   path?: string
   args?: string[]
   name?: string
+  enabled?: boolean
 }
 
 const electron = vi.hoisted(() => ({
@@ -15,8 +18,12 @@ const electron = vi.hoisted(() => ({
   getLoginItemSettings: vi.fn(),
   setAppUserModelId: vi.fn(),
   isPackaged: true,
+  /** %APPDATA%\Bluely: a temporary folder per test. */
+  userData: '',
   /** HKCU\...\CurrentVersion\Run as Electron writes and reads it: value name -> command line. */
   runKey: new Map<string, string>(),
+  /** Value names turned off in Task Manager (a "disabled" StartupApproved\Run value). */
+  disabled: new Set<string>(),
 }))
 
 vi.mock('electron', () => ({
@@ -24,6 +31,9 @@ vi.mock('electron', () => ({
     get isPackaged() {
       return electron.isPackaged
     },
+    getPath: () => electron.userData,
+    getName: () => 'Bluely',
+    getVersion: () => '0.1.0',
     setLoginItemSettings: electron.setLoginItemSettings,
     getLoginItemSettings: electron.getLoginItemSettings,
     setAppUserModelId: electron.setAppUserModelId,
@@ -52,23 +62,65 @@ const ALL_USERS_EXE = 'C:\\Program Files\\Bluely\\Bluely.exe'
 
 /** Electron's FormatCommandLineString on Windows: the quoted exe, then the args. */
 const commandLine = (path: string, args: string[] = []) => [`"${path}"`, ...args].join(' ')
+/** The exe of a Run command line written by commandLine(). */
+const programOf = (cmd: string) => cmd.slice(1, cmd.indexOf('"', 1))
 
 /**
- * Electron's Windows login items (shell/browser/browser_win.cc), reduced to the Run key:
- * enabling writes the value under `name`, disabling deletes it by name, and openAtLogin is true
- * when the value named after the AppUserModelId is exactly `"path" args`.
+ * Electron's Windows login items (shell/browser/browser_win.cc), reduced to the Run key and
+ * StartupApproved: enabling writes the value under `name` and, unless `enabled: false`, clears
+ * a Task Manager "Disabled"; disabling deletes both by name. openAtLogin is true when the value
+ * named after the AppUserModelId is exactly `"path" args`; launchItems lists the values whose
+ * exe is `path` (case-insensitive), with `enabled` from StartupApproved.
  */
 function fakeLoginItems(): void {
   electron.setLoginItemSettings.mockImplementation((s: LoginItemSettings) => {
     const name = s.name ?? win32.APP_USER_MODEL_ID
-    if (s.openAtLogin) electron.runKey.set(name, commandLine(s.path ?? process.execPath, s.args))
-    else electron.runKey.delete(name)
+    if (s.openAtLogin) {
+      electron.runKey.set(name, commandLine(s.path ?? process.execPath, s.args))
+      if (s.enabled === false) electron.disabled.add(name)
+      else electron.disabled.delete(name)
+    } else {
+      electron.runKey.delete(name)
+      electron.disabled.delete(name)
+    }
   })
-  electron.getLoginItemSettings.mockImplementation((o: LoginItemSettings = {}) => ({
-    openAtLogin:
-      electron.runKey.get(win32.APP_USER_MODEL_ID) ===
-      commandLine(o.path ?? process.execPath, o.args),
-  }))
+  electron.getLoginItemSettings.mockImplementation((o: LoginItemSettings = {}) => {
+    const path = o.path ?? process.execPath
+    return {
+      openAtLogin: electron.runKey.get(win32.APP_USER_MODEL_ID) === commandLine(path, o.args),
+      launchItems: [...electron.runKey]
+        .filter(([, cmd]) => programOf(cmd).toLowerCase() === path.toLowerCase())
+        .map(([name, cmd]) => ({
+          name,
+          path: programOf(cmd),
+          args: cmd
+            .slice(programOf(cmd).length + 3)
+            .split(' ')
+            .filter(Boolean),
+          scope: 'user',
+          enabled: !electron.disabled.has(name),
+        })),
+    }
+  })
+}
+
+/** The exe recorded in %APPDATA%\Bluely\launch-at-startup.json, or null. */
+function recorded(): string | null {
+  const file = join(electron.userData, win32.STARTUP_RECORD_FILE)
+  if (!existsSync(file)) return null
+  return (JSON.parse(readFileSync(file, 'utf8')) as { path: string }).path
+}
+
+function record(exe: string): void {
+  writeFileSync(join(electron.userData, win32.STARTUP_RECORD_FILE), JSON.stringify({ path: exe }))
+}
+
+/** An exe that exists (a file in this test's temporary folder). */
+function existingExe(...parts: string[]): string {
+  const file = join(electron.userData, '..', ...parts)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, '')
+  return file
 }
 
 const originals = {
@@ -89,7 +141,10 @@ beforeEach(() => {
   electron.setLoginItemSettings.mockReset()
   electron.getLoginItemSettings.mockReset()
   electron.runKey.clear()
+  electron.disabled.clear()
   electron.isPackaged = true
+  electron.userData = join(mkdtempSync(join(tmpdir(), 'bluely-startup-')), 'Bluely')
+  mkdirSync(electron.userData)
   fakeLoginItems()
   stubProcess('execPath', TEMP_EXE)
   vi.stubEnv('PORTABLE_EXECUTABLE_DIR', undefined)
@@ -97,6 +152,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  rmSync(dirname(electron.userData), { recursive: true, force: true })
   vi.unstubAllEnvs()
   for (const [key, descriptor] of Object.entries(originals)) {
     if (descriptor) Object.defineProperty(process, key, descriptor)
@@ -191,88 +247,169 @@ describe('platform dispatch', () => {
 describe('launch at startup is re-synced with the setting at every start', () => {
   const run = () => electron.runKey.get(win32.APP_USER_MODEL_ID)
   const hidden = (exe: string) => commandLine(exe, ['--hidden'])
+  const sync = (wanted: boolean) => platform.syncLaunchAtStartup(() => wanted)
 
   beforeEach(() => stubPlatform('win32'))
 
-  it('registers again after an uninstall removed the entry but kept the setting', () => {
+  it('registers again after an uninstall removed the entry but kept the setting', async () => {
     // The Run key is empty: build/installer.nsh deleted the value, %APPDATA%\Bluely survived.
     stubProcess('execPath', INSTALLED_EXE)
-    platform.syncLaunchAtStartup(true)
+    await sync(true)
     expect(Object.fromEntries(electron.runKey)).toEqual({
       [win32.APP_USER_MODEL_ID]: hidden(INSTALLED_EXE),
     })
+    expect(recorded()).toBe(INSTALLED_EXE)
   })
 
-  it('repoints an entry left by an install in another folder (old uninstaller ran as update)', () => {
+  it('repoints an entry left by an install in another folder (old uninstaller ran as update)', async () => {
+    // INSTALLED_EXE does not exist (here: a Windows path): that folder is gone.
+    record(INSTALLED_EXE)
     electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
     stubProcess('execPath', ALL_USERS_EXE)
-    platform.syncLaunchAtStartup(true)
+    await sync(true)
+    expect(run()).toBe(hidden(ALL_USERS_EXE))
+    expect(recorded()).toBe(ALL_USERS_EXE)
+  })
+
+  it('keeps a Task Manager "Disabled" choice when it repoints a stale entry', async () => {
+    record(INSTALLED_EXE)
+    electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
+    electron.disabled.add(win32.APP_USER_MODEL_ID)
+    stubProcess('execPath', ALL_USERS_EXE)
+    await sync(true)
+    expect(run()).toBe(hidden(ALL_USERS_EXE))
+    expect(electron.disabled.has(win32.APP_USER_MODEL_ID)).toBe(true)
+  })
+
+  it('repoints a moved portable exe at its launcher, never at the temporary copy', async () => {
+    const before = 'C:\\Users\\nadia\\Downloads\\Bluely-0.1.0-portable.exe'
+    record(before)
+    electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(before))
+    vi.stubEnv('PORTABLE_EXECUTABLE_DIR', 'D:\\Tools')
+    vi.stubEnv('PORTABLE_EXECUTABLE_FILE', PORTABLE_EXE)
+    await sync(true)
+    expect(run()).toBe(hidden(PORTABLE_EXE))
+    expect(recorded()).toBe(PORTABLE_EXE)
+  })
+
+  it('repoints an entry no copy recorded (written before the record existed)', async () => {
+    electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
+    stubProcess('execPath', ALL_USERS_EXE)
+    await sync(true)
     expect(run()).toBe(hidden(ALL_USERS_EXE))
   })
 
-  it('repoints a moved portable exe at its launcher, never at the temporary copy', () => {
-    electron.runKey.set(
-      win32.APP_USER_MODEL_ID,
-      hidden('C:\\Users\\nadia\\Downloads\\Bluely-0.1.0-portable.exe'),
-    )
+  it('leaves the entry of another copy that still exists alone, whatever this copy wants', async () => {
+    // The installed app turned Launch at startup on, and the user disabled it in Task Manager.
+    const installed = existingExe('Programs', 'Bluely', 'Bluely.exe')
+    stubProcess('execPath', installed)
+    win32.setLaunchAtStartup(true)
+    electron.disabled.add(win32.APP_USER_MODEL_ID)
+    electron.setLoginItemSettings.mockClear()
+
+    // Then a portable copy (same %APPDATA%\Bluely, same value name) starts, with either setting.
+    stubProcess('execPath', TEMP_EXE)
     vi.stubEnv('PORTABLE_EXECUTABLE_DIR', 'D:\\Tools')
     vi.stubEnv('PORTABLE_EXECUTABLE_FILE', PORTABLE_EXE)
-    platform.syncLaunchAtStartup(true)
-    expect(run()).toBe(hidden(PORTABLE_EXE))
+    await sync(true)
+    await sync(false)
+    // So do release\win-unpacked\Bluely.exe and the packaged E2E test on a developer's PC.
+    vi.stubEnv('PORTABLE_EXECUTABLE_DIR', undefined)
+    vi.stubEnv('PORTABLE_EXECUTABLE_FILE', undefined)
+    stubProcess('execPath', 'C:\\src\\bluely\\release\\win-unpacked\\Bluely.exe')
+    await sync(true)
+    await sync(false)
+
+    expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
+    expect(run()).toBe(hidden(installed))
+    expect(electron.disabled.has(win32.APP_USER_MODEL_ID)).toBe(true)
+    expect(recorded()).toBe(installed)
   })
 
-  it('leaves a correct entry alone, so a Task Manager "Disabled" choice is kept', () => {
+  it('leaves a correct entry alone, so a Task Manager "Disabled" choice is kept', async () => {
     stubProcess('execPath', INSTALLED_EXE)
     electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
-    platform.syncLaunchAtStartup(true)
+    await sync(true)
     expect(electron.getLoginItemSettings).toHaveBeenCalledWith({
       path: INSTALLED_EXE,
       args: ['--hidden'],
     })
     // Rewriting would also delete the StartupApproved value (Electron's `enabled: true` default).
     expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
+    // An entry written before the record existed is recorded now.
+    expect(recorded()).toBe(INSTALLED_EXE)
   })
 
-  it('removes an entry the setting does not want, wherever it points', () => {
+  it("removes this exe's entry when the setting is off", async () => {
+    stubProcess('execPath', INSTALLED_EXE)
+    win32.setLaunchAtStartup(true)
+    await sync(false)
+    expect(electron.runKey.size).toBe(0)
+    expect(recorded()).toBeNull()
+  })
+
+  it('removes an entry for a recorded exe that is gone when the setting is off', async () => {
+    record(INSTALLED_EXE)
     electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
     stubProcess('execPath', ALL_USERS_EXE)
-    platform.syncLaunchAtStartup(false)
+    await sync(false)
     expect(electron.runKey.size).toBe(0)
   })
 
-  it('registers nothing for a portable build started without its launcher', () => {
-    vi.stubEnv('PORTABLE_EXECUTABLE_DIR', 'D:\\Tools')
-    expect(() => platform.syncLaunchAtStartup(true)).not.toThrow()
+  it('leaves an entry no copy recorded alone when the setting is off', async () => {
+    electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
+    stubProcess('execPath', ALL_USERS_EXE)
+    await sync(false)
     expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
   })
 
-  it("never touches the installed app's entry from an unpackaged (dev/test) run", () => {
-    electron.isPackaged = false
+  it('never undoes a change the user makes while it checks the other exe', async () => {
+    record(INSTALLED_EXE)
     electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
-    platform.syncLaunchAtStartup(false)
-    platform.syncLaunchAtStartup(true)
+    stubProcess('execPath', ALL_USERS_EXE)
+    let wanted = true
+    const pending = platform.syncLaunchAtStartup(() => wanted)
+    // Settings › General: the user turns it off; the settings handler deletes the entry at once.
+    wanted = false
+    win32.setLaunchAtStartup(false)
+    await pending
+    expect(electron.runKey.size).toBe(0)
+  })
+
+  it('registers nothing for a portable build started without its launcher', async () => {
+    vi.stubEnv('PORTABLE_EXECUTABLE_DIR', 'D:\\Tools')
+    await expect(sync(true)).resolves.toBeUndefined()
+    expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
+  })
+
+  it("never touches the installed app's entry from an unpackaged (dev/test) run", async () => {
+    electron.isPackaged = false
+    record(INSTALLED_EXE)
+    electron.runKey.set(win32.APP_USER_MODEL_ID, hidden(INSTALLED_EXE))
+    await sync(false)
+    await sync(true)
     expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
     expect(run()).toBe(hidden(INSTALLED_EXE))
   })
 
-  it('does nothing where launch at startup is unsupported', () => {
+  it('does nothing where launch at startup is unsupported', async () => {
     stubPlatform('linux')
-    platform.syncLaunchAtStartup(true)
-    platform.syncLaunchAtStartup(false)
+    await sync(true)
+    await sync(false)
     expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
   })
 
-  it('macOS: changes the login item only when it differs from the setting', () => {
+  it('macOS: changes the login item only when it differs from the setting', async () => {
     stubPlatform('darwin')
     electron.getLoginItemSettings.mockReturnValue({ openAtLogin: true })
-    platform.syncLaunchAtStartup(true)
+    await sync(true)
     expect(electron.setLoginItemSettings).not.toHaveBeenCalled()
-    platform.syncLaunchAtStartup(false)
+    await sync(false)
     expect(electron.setLoginItemSettings).toHaveBeenCalledWith({ openAtLogin: false })
   })
 })
 
-describe('core handlers re-sync launch at startup when Bluely starts', () => {
+describe('core handlers', () => {
   function start(launchAtStartup: boolean) {
     const log = { warn: vi.fn(), setDebug: vi.fn() }
     const ctx = {
@@ -283,11 +420,15 @@ describe('core handlers re-sync launch at startup when Bluely starts', () => {
       secrets: {},
       events: {},
       overlay: {},
+      paths: { userData: electron.userData },
+      env: { isDev: false },
       log,
     } as unknown as CoreContext
     registerCoreHandlers(ctx, { quit: () => undefined })
     return { log }
   }
+
+  const appInfo = () => (handlers.get('app:getInfo') as () => AppInfo)()
 
   beforeEach(() => {
     handlers.clear()
@@ -295,26 +436,49 @@ describe('core handlers re-sync launch at startup when Bluely starts', () => {
     stubProcess('execPath', INSTALLED_EXE)
   })
 
-  it('registers the entry when the stored setting is on but nothing is registered', () => {
+  it('register the entry when the stored setting is on but nothing is registered', async () => {
     start(true)
-    expect(electron.runKey.get(win32.APP_USER_MODEL_ID)).toBe(
-      commandLine(INSTALLED_EXE, ['--hidden']),
+    await vi.waitFor(() =>
+      expect(electron.runKey.get(win32.APP_USER_MODEL_ID)).toBe(
+        commandLine(INSTALLED_EXE, ['--hidden']),
+      ),
     )
   })
 
-  it('removes a leftover entry when the stored setting is off', () => {
-    electron.runKey.set(win32.APP_USER_MODEL_ID, commandLine(ALL_USERS_EXE, ['--hidden']))
+  it("remove this exe's leftover entry when the stored setting is off", async () => {
+    electron.runKey.set(win32.APP_USER_MODEL_ID, commandLine(INSTALLED_EXE, ['--hidden']))
     start(false)
-    expect(electron.runKey.size).toBe(0)
+    await vi.waitFor(() => expect(electron.runKey.size).toBe(0))
   })
 
-  it('logs and carries on when the entry cannot be written', () => {
+  it('log and carry on when the entry cannot be written', async () => {
     electron.setLoginItemSettings.mockImplementation(() => {
       throw new Error('Access is denied')
     })
     const { log } = start(true)
-    expect(log.warn).toHaveBeenCalledWith('Could not re-sync launch at startup', expect.any(Error))
     expect(handlers.has('settings:get')).toBe(true)
+    await vi.waitFor(() =>
+      expect(log.warn).toHaveBeenCalledWith(
+        'Could not re-sync launch at startup',
+        expect.any(Error),
+      ),
+    )
+  })
+
+  it('tell Settings (app:getInfo) whether launch at startup can work in this build', () => {
+    start(false)
+    expect(appInfo()).toMatchObject({ isPortable: false, canLaunchAtStartup: true })
+
+    // A portable build started through its launcher can (it registers the launcher)...
+    vi.stubEnv('PORTABLE_EXECUTABLE_DIR', 'D:\\Tools')
+    vi.stubEnv('PORTABLE_EXECUTABLE_FILE', PORTABLE_EXE)
+    expect(appInfo()).toMatchObject({ isPortable: true, canLaunchAtStartup: true })
+    // ...without its launcher path it cannot, and the toggle is disabled instead of a no-op.
+    vi.stubEnv('PORTABLE_EXECUTABLE_FILE', undefined)
+    expect(appInfo()).toMatchObject({ isPortable: true, canLaunchAtStartup: false })
+
+    stubPlatform('linux')
+    expect(appInfo()).toMatchObject({ isPortable: false, canLaunchAtStartup: false })
   })
 })
 

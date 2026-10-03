@@ -408,6 +408,8 @@ function AdvancedSection() {
 export function GeneralPage() {
   const general = useSettings((s) => s.settings.general)
   const { save, error } = useSave()
+  // Only a definite "no" from the main process disables Launch at startup (e.g. not Windows).
+  const startupAvailable = useAppInfo()?.canLaunchAtStartup !== false
 
   const themeOptions: SelectOption<ThemePreference>[] = [
     { value: 'system', label: t('settings.theme.system') },
@@ -438,10 +440,15 @@ export function GeneralPage() {
         <SettingsRow
           icon={<Power size={18} />}
           title={t('settings.general.startupTitle')}
-          description={t('settings.general.startupDescription')}
+          description={
+            startupAvailable
+              ? t('settings.general.startupDescription')
+              : t('settings.general.startupUnavailable')
+          }
           control={
             <Switch
-              checked={general.launchAtStartup}
+              checked={startupAvailable && general.launchAtStartup}
+              disabled={!startupAvailable}
               onCheckedChange={(v) => void save({ general: { launchAtStartup: v } })}
               label={t('settings.general.startupTitle')}
             />
