@@ -15,10 +15,11 @@ Settings can open this folder for you.
 | `openrouter-key.bin`  | Your OpenRouter API key, encrypted with Windows DPAPI through Electron `safeStorage`. Only your Windows user account can decrypt it.                                                                                                                                                                                       |
 | `models-cache.json`   | A cached copy of OpenRouter's public model list (names, prices, capabilities).                                                                                                                                                                                                                                             |
 | `logs/bluely.log`     | Diagnostic log, rotated at about 2 MB (one previous file is kept as `bluely.log.1`). API keys and bearer tokens are redacted before anything is written.                                                                                                                                                                     |
-| `screenshots/`        | Only if you turn on _Save screenshots with sessions_ (Settings › Privacy, **off by default**). Otherwise screenshots exist only in memory while a request is sent.                                                                                                                                                        |
+| `screenshots/`        | Only if you turn on _Save screenshots with sessions_ (Settings › Privacy & Data, **off by default**). Otherwise screenshots exist only in memory while a request is sent.                                                                                                                                                 |
 
 **Audio is never stored.** Microphone and desktop audio are processed in memory: speech segments
-are sent for transcription and then discarded. Only the resulting text is saved.
+(and the microphone test sample) are sent for transcription and then discarded. Only the
+resulting text of a session is saved.
 
 The database file is not encrypted. Anyone who can sign in to your Windows account (or read your
 disk) can read it, just like your other documents. Use Windows device encryption (BitLocker) if
@@ -34,6 +35,10 @@ call is made by Bluely's main process.
 - **Speech segments** (16 kHz mono WAV, at most 12 seconds each by default) for transcription,
   for both your microphone ("Me") and desktop audio ("Them") while a session is running. Silence
   is not sent: voice activity detection runs locally.
+- **A 5-second microphone recording** when you click _Test microphone_ (onboarding step 2, or
+  Settings › General › Audio settings), sent for transcription so the test can show what Bluely
+  heard. This happens outside any session. The recording and its text are not stored; only the
+  request's model and cost go into the usage log. A silent sample is not sent.
 - **Prompts** for suggestions, actions, questions, notes and emails. Depending on the request a
   prompt contains: recent transcript excerpts, the running summary of the meeting, your profile
   (name, role, company, about), the active Mode's instructions, and relevant snippets from that
@@ -69,13 +74,18 @@ No telemetry, no analytics, no crash reporting, no accounts, no Bluely server. L
 
 ## Your controls
 
-- **Retention** (Settings › Privacy): keep sessions forever (default), or delete them
+- **Retention** (Settings › Privacy & Data): keep sessions forever (default), or delete them
   automatically after 30, 90 or 365 days.
 - **Export all**: writes your sessions to a file you choose.
-- **Delete all**: permanently deletes your stored meeting data after you confirm.
+- **Delete all** (Settings › Privacy & Data): after you confirm, permanently deletes every
+  session (transcripts, AI messages, notes, action items, follow-up emails), knowledge files and
+  their extracted text, custom Modes, saved screenshots, latency statistics and the usage log. It
+  keeps your settings (including your profile), the built-in Modes, the encrypted API key, the
+  logs and `models-cache.json`, so Bluely keeps working.
 - **Remove the API key**: Settings › AI Models.
 - Deleting a single session removes its transcript, AI messages, notes and action items.
-- Uninstalling Bluely keeps `%APPDATA%\Bluely`; delete that folder to remove everything.
+- Uninstalling Bluely keeps `%APPDATA%\Bluely`; delete that folder to remove everything,
+  including your settings, the API key and the logs.
 
 ## Other people on your calls
 

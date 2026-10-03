@@ -26,6 +26,19 @@ export function loopbackAudioOption(): LoopbackAudio {
   return null
 }
 
+/**
+ * Whether "Launch at startup" can be turned on in this build: Windows (installed, or portable
+ * started through its launcher) and macOS. Settings can hide or disable the toggle when false.
+ */
+export function canLaunchAtStartup(): boolean {
+  if (process.platform === 'win32') return win32.canLaunchAtStartup()
+  return process.platform === 'darwin'
+}
+
+/**
+ * Registers (or removes) Bluely as a sign-in item; does nothing on other platforms. On Windows,
+ * enabling throws when canLaunchAtStartup() is false instead of registering a temporary exe.
+ */
 export function setLaunchAtStartup(enabled: boolean): void {
   if (process.platform === 'win32') {
     win32.setLaunchAtStartup(enabled)

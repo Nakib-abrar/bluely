@@ -183,13 +183,20 @@ exams.
 
 1. Update `version` in `package.json` and move the "Unreleased" notes in `CHANGELOG.md` under the
    new version.
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. `.github/workflows/release.yml` checks, tests and builds on Windows, then publishes the GitHub
-   Release with `Bluely-Setup-<version>.exe`, its `.blockmap`, `latest.yml` (used by the
-   auto-updater), `Bluely-<version>-portable.exe` and `SHA256SUMS.txt`. The tag must equal
-   `v` + the `package.json` version.
-4. Edit the release notes on GitHub (paste the changelog section).
+2. Check desktop audio on real Windows 10 and 11 PCs with a dry-run build (see
+   [Before a release: check real Windows hardware](docs/VERIFY_LOOPBACK.md#before-a-release-check-real-windows-hardware))
+   and record the result.
+3. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+4. `.github/workflows/release.yml` checks, tests and builds on Windows, creates the GitHub Release
+   as a draft, attaches `Bluely-Setup-<version>.exe`, its `.blockmap`,
+   `Bluely-<version>-portable.exe`, `latest.yml` (used by the auto-updater) and finally
+   `SHA256SUMS.txt`, and only then publishes it. If an upload fails, the job fails before
+   `SHA256SUMS.txt` is attached and before anything is published; re-run the job. The tag must
+   equal `v` + the `package.json` version.
+5. Edit the release notes on GitHub (paste the changelog section).
 
-For a dry run, use _Actions → Release → Run workflow_ with _publish_ unchecked; the artifacts are
-attached to the workflow run instead. Before upgrading Electron, run the
+To rebuild and replace the files of an existing release, run _Actions → Release → Run workflow_
+on its `v*` tag with _publish_ checked: every file, including `SHA256SUMS.txt`, is replaced from
+the new build. For a dry run, leave _publish_ unchecked; the artifacts are attached to the
+workflow run instead. Before upgrading Electron, run the
 [loopback verifier](docs/VERIFY_LOOPBACK.md) with the new version on Windows.

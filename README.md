@@ -92,12 +92,16 @@ Bluely runs on **Windows 10 and 11 (x64)**.
 
 1. Open the [latest release](https://github.com/nakib-abrar/bluely/releases/latest) and download
    one of:
-   - **`Bluely-Setup-<version>.exe`**: installer (recommended). Installs for your user only (no
-     admin rights needed), lets you choose the folder, adds Start menu and desktop shortcuts, and
-     **auto-updates**: it checks GitHub Releases for new versions, downloads one when you click
-     _Download_, and installs it on _Restart to update_ (or the next time you quit).
+   - **`Bluely-Setup-<version>.exe`**: installer (recommended). It first asks who to install for:
+     **only for me** (the default; no admin rights needed, installs to
+     `%LOCALAPPDATA%\Programs\Bluely`) or **anyone who uses this computer** (asks for admin
+     rights, installs to `Program Files`). It lets you choose the folder, adds Start menu and
+     desktop shortcuts, and **auto-updates**: it checks GitHub Releases for new versions, downloads
+     one when you click _Download_, and installs it on _Restart to update_ (or the next time you
+     quit).
    - **`Bluely-<version>-portable.exe`**: single file, nothing installed. Portable builds do
-     **not** auto-update; download a new release to upgrade.
+     **not** auto-update; download a new release to upgrade. _Launch at startup_ registers this
+     exe where it is, so turn it off before you move or delete the file.
 2. **Windows SmartScreen.** Bluely's builds are not code-signed yet (a certificate costs money the
    project does not have), so Windows shows _"Windows protected your PC"_ the first time. Click
    **More info → Run anyway**. Only do this for files downloaded from the official Releases page.
@@ -109,8 +113,12 @@ Bluely runs on **Windows 10 and 11 (x64)**.
 
    The hash must match the line for that file in `SHA256SUMS.txt`.
 
-Uninstalling (Settings › Apps) removes the program but keeps your data in `%APPDATA%\Bluely`.
-Delete that folder, or use Settings › Privacy › Delete all data first, to remove everything.
+Uninstalling (Windows Settings › Apps) removes the program and its _Launch at startup_ entry but
+keeps your data in `%APPDATA%\Bluely`. **Settings › Privacy & Data › Delete all data** removes your
+sessions (transcripts, notes, action items, AI answers), knowledge files, custom Modes, saved
+screenshots and usage statistics, but keeps your settings and profile, the encrypted API key, the
+logs and the cached list of OpenRouter models. To remove everything, delete the `%APPDATA%\Bluely`
+folder after uninstalling.
 
 ## Get an OpenRouter key
 
@@ -133,11 +141,16 @@ masked form such as `sk-or-…9f3c`.
 
 Bluely opens a three-step onboarding the first time:
 
-1. **Connect OpenRouter**: paste your key and test it.
-2. **Check your audio**: pick your microphone and confirm Bluely can hear you and your computer's
-   audio (use headphones on calls so your speakers do not leak into the microphone).
-3. **Meet the overlay**: learn the main shortcuts and the consent reminder, then start your first
-   session.
+1. **Connect your OpenRouter key**: paste your key and click **Test connection** (or skip and add
+   it later in Settings › AI Models).
+2. **Check your audio**: pick your microphone, click **Test microphone** (Bluely records 5 seconds
+   and shows what it transcribed) and **Test system audio** (play a video or music first). The
+   same step shows the Ask shortcut, <kbd>Ctrl</kbd>+<kbd>Enter</kbd>, with a one-click switch to
+   <kbd>Alt</kbd>+<kbd>Enter</kbd> for chat apps that send messages with Ctrl+Enter. Use
+   headphones on calls so your speakers do not leak into the microphone.
+3. **Pick a Mode**: choose what kind of call it is, optionally add files for that Mode (product
+   sheets, pricing, your CV) and your name. Then click **Start Bluely** to start a session right
+   away, or **Finish setup**.
 
 Start a session from the main window, the tray icon or the overlay. Stop it with
 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>&#92;</kbd> and Bluely writes the notes.
@@ -172,11 +185,12 @@ GitHub in installed builds).
   transcripts, AI answers, notes, Modes, knowledge text and settings; the encrypted API key; logs
   (API keys redacted). Screenshots are saved only if you turn on _Save screenshots with sessions_
   (off by default).
-- Sent to OpenRouter: speech segments for transcription, and prompts containing transcript
-  excerpts, your profile, Mode instructions and knowledge snippets. A screenshot is sent only when
-  you use Assist or turn on _Include screen_.
+- Sent to OpenRouter: speech segments for transcription (during a session, and the 5-second
+  sample when you click _Test microphone_), and prompts containing transcript excerpts, your
+  profile, Mode instructions and knowledge snippets. A screenshot is sent only when you use Assist
+  or turn on _Include screen_.
 - Retention (keep forever, 30, 90 or 365 days), _Export all_ and _Delete all_ are in Settings ›
-  Privacy.
+  Privacy & Data.
 
 Exactly what is stored, where, and what is sent: **[PRIVACY.md](PRIVACY.md)**.
 
@@ -245,12 +259,14 @@ Any `sk-or-…` key works with the mock. On Linux, run E2E tests under Xvfb:
 ## Architecture
 
 Electron 43.7.7 (pinned exactly, because desktop loopback capture depends on the Electron
-version; see [docs/VERIFY_LOOPBACK.md](docs/VERIFY_LOOPBACK.md)) + electron-vite + TypeScript +
-React 19 + Tailwind CSS v4. The main process owns everything
-privileged: the SQLite database (better-sqlite3, FTS5 search), the encrypted key, and every network
-call. The two renderers (main window and overlay) run sandboxed with context isolation and talk to
-main only through a typed, zod-validated IPC contract (`src/shared/ipc.ts`). Audio is captured in
-the overlay renderer, cut into speech segments with Silero VAD, and transcribed in main.
+version; it passes the loopback verifier in Windows CI with a virtual sound card but has not yet
+been verified on a physical Windows 10/11 PC, see
+[docs/VERIFY_LOOPBACK.md](docs/VERIFY_LOOPBACK.md)) + electron-vite + TypeScript + React 19 +
+Tailwind CSS v4. The main process owns everything privileged: the SQLite database
+(better-sqlite3, FTS5 search), the encrypted key, and every network call. The two renderers
+(main window and overlay) run sandboxed with context isolation and talk to main only through a
+typed, zod-validated IPC contract (`src/shared/ipc.ts`). Audio is captured in the overlay
+renderer, cut into speech segments with Silero VAD, and transcribed in main.
 
 Details: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Problems:
 **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.

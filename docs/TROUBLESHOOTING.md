@@ -19,7 +19,7 @@ seconds and nothing has come from that device.
 
 1. **Play something** (a YouTube video) while a session runs. If Them lines appear, capture works
    and the meeting app is playing somewhere else.
-2. **Make the meeting app use the default output.** In Windows _Settings › System › Sound_, check
+2. **Make the meeting app use the default output.** In _Windows Settings › System › Sound_, check
    the _Output_ device. In Teams/Zoom/Meet, set the speaker to "Default" or to that same device. If
    the meeting app plays to a different device (for example a headset that is not the Windows
    default), switch the Windows default to it.
@@ -37,7 +37,7 @@ seconds and nothing has come from that device.
 
 ## Microphone muted or not found ("Me" stays empty)
 
-- **Windows privacy:** _Settings › Privacy & security › Microphone_: turn on _Microphone access_
+- **Windows privacy:** _Windows Settings › Privacy & security › Microphone_: turn on _Microphone access_
   and _Let desktop apps access your microphone_.
 - **Pick the right microphone** in Bluely's audio settings (or onboarding) and use the test to
   see a live transcription. If you plug in a headset after starting Bluely, select it again.

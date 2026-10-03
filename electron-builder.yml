@@ -54,6 +54,8 @@ win:
   artifactName: ${productName}-${version}-win-${arch}.${ext}
 
 nsis:
+  # Assisted installer: a page asks "Only for me" (default, per-user, no admin rights) or
+  # "Anyone who uses this computer" (all users, asks for admin rights, Program Files).
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -64,6 +66,8 @@ nsis:
   deleteAppDataOnUninstall: false
   # Referenced by latest.yml; electron-updater downloads exactly this file name.
   artifactName: Bluely-Setup-${version}.${ext}
+  # customUnInstall removes the launch-at-startup Run entry (not on updates).
+  include: build/installer.nsh
 
 portable:
   # Portable builds do not auto-update (electron-updater only supports the NSIS target).
@@ -71,8 +75,11 @@ portable:
 
 # electron-updater reads the generated resources/app-update.yml (NSIS build) and checks
 # https://github.com/nakib-abrar/bluely/releases for latest.yml.
+# The release workflow builds with --publish never and uploads the files itself with gh
+# (draft first, published once every file is attached; see .github/workflows/release.yml).
+# If you ever run `electron-builder --publish always` by hand, it creates a draft.
 publish:
   provider: github
   owner: nakib-abrar
   repo: bluely
-  releaseType: release
+  releaseType: draft

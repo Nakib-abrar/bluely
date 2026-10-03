@@ -5,6 +5,13 @@ Electron's `setDisplayMediaRequestHandler` with `audio: 'loopback'`. That path l
 Chromium and has changed between Electron versions, so Bluely pins an exact Electron version
 (**43.7.7**) and ships a small, standalone verifier to check any version before upgrading.
 
+> **Status:** 43.7.7 passes the verifier in Windows CI (Windows Server 2022 and 2025 runners with
+> a virtual sound card) and on Linux. It **has not yet been verified on a physical Windows 10 or
+> 11 PC** with a real playback device in this project. Until a result from real hardware is
+> recorded in [Results so far](#results-so-far), treat Windows loopback on real PCs as
+> unverified, and run the [real-hardware check](#before-a-release-check-real-windows-hardware)
+> before tagging a release.
+
 ## What the verifier does
 
 `scripts/verify-loopback/` (`main.cjs`, `index.html`, `renderer.js`) is a dependency-free
@@ -75,14 +82,35 @@ Options: `--verbose` prints every step (the page's logs and the track settings);
 
 ## Results so far
 
-| Electron | Chromium       | Windows 10 / 11  | Linux (PulseAudio null sink, Xvfb)          |
-| -------- | -------------- | ---------------- | ------------------------------------------- |
-| 42.11.10 | 148.0.7778.280 | not yet reported | PASS (tone -12.2 dBFS, floor -91.3)         |
-| 43.7.7   | 150.0.7871.250 | not yet reported | PASS (tone -12.0 to -12.2 dBFS, 10 of 10 runs) |
-| 44.5.1   | 152.0.7977.130 | not yet reported | PASS (tone -12.2 dBFS, floor -120)          |
+| Electron | Chromium       | Windows 10 / 11 PC (real hardware) | Windows CI: Server 2022 / Server 2025 (VB-CABLE) | Linux (PulseAudio null sink, Xvfb)             |
+| -------- | -------------- | ---------------------------------- | ------------------------------------------------ | ---------------------------------------------- |
+| 42.11.10 | 148.0.7778.280 | not yet verified                   | PASS / PASS (tone -12.3 / -12.1 dBFS)            | PASS (tone -12.2 dBFS, floor -91.3)            |
+| 43.7.7   | 150.0.7871.250 | not yet verified                   | PASS / PASS (tone -12.2 / -12.3 dBFS)            | PASS (tone -12.0 to -12.2 dBFS, 10 of 10 runs) |
+| 44.5.1   | 152.0.7977.130 | not yet verified                   | PASS / PASS (tone -12.2 / -12.1 dBFS)            | PASS (tone -12.2 dBFS, floor -120)             |
 
-The Linux results were measured in a container (see below). Please add Windows results with a
-pull request or an issue: paste the full output plus your Windows version and audio device.
+- **Windows CI** is `.github/workflows/loopback-windows.yml` (results above from run
+  [37054517158](https://github.com/nakib-abrar/bluely/actions/runs/37054517158)). GitHub's Windows
+  runners have no sound card, so it installs the VB-CABLE virtual audio device and starts the
+  Windows Audio service first. That shows Chromium's Windows loopback path works with this
+  Electron version, but a virtual cable is not a real speaker or headset driver (no vendor
+  enhancements, Bluetooth hands-free switching or exclusive-mode apps), and Windows Server is not
+  Windows 10/11.
+- **Linux** results were measured in a container (see below).
+- **Real hardware**: please add results with a pull request or an issue: paste the full output
+  plus your Windows version (`winver`) and audio device.
+
+### Before a release: check real Windows hardware
+
+On at least one Windows 10 PC and one Windows 11 PC with a real playback device (not a remote
+desktop session or a VM):
+
+1. Run the verifier with the pinned version, as in [Run it on Windows](#run-it-on-windows):
+   `pnpm verify:loopback` from a checkout, or `npx electron@43.7.7 scripts/verify-loopback/main.cjs`.
+   It must print `LOOPBACK PASS`.
+2. In Bluely itself (the release candidate's installer): play a video, then
+   _Settings › General › Audio settings › Test system audio_ must report _System audio detected_.
+3. Start a session while a video with speech plays: "Them" lines must appear in the transcript.
+4. Record the result in the table above (Windows version, audio device, verifier output).
 
 ## Audio processing must be off
 
