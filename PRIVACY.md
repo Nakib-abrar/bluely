@@ -11,17 +11,26 @@ Settings can open this folder for you.
 
 | File / folder            | Contents                                                                                                                                                                                                                                                                                                                                                                                        |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bluely.db`              | SQLite database: sessions (title, Mode, start/end time), **transcript text**, **AI messages including the prompts sent and the responses received**, notes, action items, follow-up emails, Modes, **extracted text of knowledge files** plus file metadata (name, size; the original files are not copied), settings, model latency statistics, and a usage log with the cost of each request. |
+| `bluely.db`              | SQLite database (with its `-wal` and `-shm` working files): sessions (title, Mode, start/end time), **transcript text**, **AI messages including the prompts sent and the responses received** (except "Ask across meetings": those questions and answers are kept in memory only and are gone when Bluely quits), notes, action items, follow-up emails, Modes, **extracted text of knowledge files** plus file metadata (name, size; the original files are not copied), settings, model latency statistics, and a usage log with the cost of each request. |
 | `openrouter-key.bin`     | Your OpenRouter API key, encrypted with Windows DPAPI through Electron `safeStorage`. Only your Windows user account can decrypt it.                                                                                                                                                                                                                                                            |
 | `models-cache.json`      | A cached copy of OpenRouter's public model list (names, prices, capabilities).                                                                                                                                                                                                                                                                                                                  |
 | `logs/bluely.log`        | Diagnostic log, rotated at about 2 MB (one previous file is kept as `bluely.log.1`). API keys and bearer tokens are redacted before anything is written.                                                                                                                                                                                                                                        |
 | `screenshots/`           | Only if you turn on _Save screenshots with sessions_ (Settings › Privacy & Data, **off by default**). Otherwise screenshots exist only in memory while a request is sent.                                                                                                                                                                                                                       |
 | `launch-at-startup.json` | Only if you turn on _Launch at startup_ (Settings › General): the path of the Bluely exe that Windows starts when you sign in, so that another copy of Bluely (installed or portable) leaves that entry alone.                                                                                                                                                                                  |
+| Browser-engine folders   | `Local State`, `Preferences`, `Cache`, `Code Cache`, `GPUCache`, `Local Storage`, `Crashpad` and similar are created by Electron's Chromium engine: its own settings and caches of Bluely's built-in pages and GPU shaders (`Crashpad` holds only a random id: Bluely never turns on crash reporting, so no crash report is sent). Bluely keeps none of your meeting data in them. |
 
-Outside this folder Bluely writes one thing: when _Launch at startup_ is on, a value named
-`io.github.nakib-abrar.bluely` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` in
-the registry (the command that starts Bluely in the tray). Turning the option off or uninstalling
-removes it.
+Outside this folder Bluely writes only these:
+
+- **Launch at startup**: when it is on, a value named `io.github.nakib-abrar.bluely` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` in the registry (the command that starts
+  Bluely in the tray), and Windows' matching `StartupApproved` value, which records a Task
+  Manager "Disabled" (Bluely keeps that choice when it updates the entry). Turning the option off
+  or uninstalling removes both.
+- **Update cache** (installed builds only): `%LOCALAPPDATA%\bluely-updater`. The installer
+  copies itself there as `installer.exe` (so updates can download only the changed parts), and an
+  update you download with _Download_ is saved in its `pending` folder. It holds only Bluely's own
+  installer files, none of your data. Uninstalling does not remove this folder.
+- **Files you save**: _Export all_ and a session's export write a file where you choose.
 
 **Audio is never stored.** Microphone and desktop audio are processed in memory: speech segments
 (and the microphone test sample) are sent for transcription and then discarded. Only the
@@ -91,7 +100,8 @@ No telemetry, no analytics, no crash reporting, no accounts, no Bluely server. L
 - **Remove the API key**: Settings › AI Models.
 - Deleting a single session removes its transcript, AI messages, notes and action items.
 - Uninstalling Bluely keeps `%APPDATA%\Bluely`; delete that folder to remove everything,
-  including your settings, the API key and the logs.
+  including your settings, the API key and the logs (and `%LOCALAPPDATA%\bluely-updater` to
+  remove the cached installer too).
 
 ## Other people on your calls
 

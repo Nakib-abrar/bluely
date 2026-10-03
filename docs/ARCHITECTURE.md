@@ -167,7 +167,7 @@ SQLite via better-sqlite3 in `%APPDATA%\Bluely\bluely.db`, opened with WAL,
 | ---------------------------------------- | ------------------------------------------------------------------------ |
 | `sessions`                               | title, Mode, start/end, status, `summary_json` (notes, email, running summary) |
 | `transcript_lines`                       | channel (`me`/`them`), start/end ms, text, `is_final`                    |
-| `ai_messages`                            | every AI request: kind, prompt, response, model, provider, timings, tokens, cost, `used_screen` |
+| `ai_messages`                            | every AI request except "Ask across meetings" (kept in memory only): kind, prompt, response, model, provider, timings, tokens, cost, `used_screen` |
 | `action_items`                           | text, owner, due, done                                                   |
 | `modes`, `knowledge_files`, `knowledge_chunks` (+ `knowledge_chunks_fts`) | Modes and their extracted knowledge text |
 | `settings`                               | settings JSON (schema in `src/shared/settings.ts`)                       |
@@ -178,8 +178,10 @@ removed, prefix indexes) for normal queries and `search_trigram` for typo-tolera
 row's rowid encodes its source (`source.rowid * 8 + tag`) so updates and deletes are cheap; titles,
 final transcript lines, notes, action items and emails are indexed. "Ask across meetings" runs a
 search, sends the best excerpts to the model and returns an answer with citations to the
-sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
-`PRAGMA incremental_vacuum`, and `rebuildSearchIndex()` if the index ever drifts.
+sessions used; its questions and answers are not written to `bluely.db` (the last 20 stay in
+main-process memory until Bluely quits), only the request's cost goes into `usage_log`. Never
+run a plain `VACUUM` (it can renumber rowids); use `PRAGMA incremental_vacuum`, and
+`rebuildSearchIndex()` if the index ever drifts.
 
 ## Packaging and updates
 
@@ -220,16 +222,21 @@ sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
   `SHA256SUMS.txt` (also printed in the job summary). The publish step uploads with `gh`: a new
   release is created as a **draft**, then the Setup exe, its blockmap, the portable exe,
   `latest.yml` and finally `SHA256SUMS.txt` are attached one by one, and only then is the release
-  published, so the auto-updater never sees a half-uploaded release. Re-running on an existing
-  release replaces all of its files from the new build; a failed upload fails the job.
+  published, so the auto-updater never sees a half-uploaded release. A draft is published as
+  "Latest" only when no published release has a higher version (`--latest` is always explicit:
+  the API would default it to true). Re-running on an already published release replaces all of
+  its files from the new build and leaves the release itself, including its Latest status,
+  untouched; a failed upload fails the job.
   (electron-builder's own publisher silently skips releases published more than 2 hours ago,
   which is why it is not used.) Manual runs are dry runs that upload workflow artifacts unless
   _publish_ is checked on a `v*` tag.
 - **Auto-update** (`src/main/updater.ts`): electron-updater with the GitHub provider, installed
   (NSIS) builds only. It checks ~10 s after start and every 6 h, never downloads without the user
   clicking _Download_, verifies the installer's SHA-512 from `latest.yml`, and installs on
-  _Restart to update_ or when Bluely quits. Development and portable builds report
-  "unsupported" and never contact GitHub. State is pushed to the UI as `updater:status`.
+  _Restart to update_ or when Bluely quits. Its cache is `%LOCALAPPDATA%\bluely-updater`
+  (`updaterCacheDirName` in `app-update.yml`): the NSIS installer copies itself there as
+  `installer.exe` for differential downloads, and downloads go to `pending\`. Development and
+  portable builds report "unsupported" and never contact GitHub. State is pushed to the UI as `updater:status`.
 - **Electron pin**: `electron` is pinned to an exact version (43.7.7). Desktop loopback has
   regressed between Electron versions before, so any upgrade must pass
   [the loopback verifier](VERIFY_LOOPBACK.md) on Windows. 43.7.7 passes it in Windows CI

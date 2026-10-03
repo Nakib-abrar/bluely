@@ -75,7 +75,9 @@ build or take a minute to measure:
 
 `.github/workflows/loopback-windows.yml` runs all four on Windows Server 2022 and 2025 runners
 with a virtual sound card (VB-CABLE), plus the loopback verifier for the pinned Electron and its
-neighbours.
+neighbours. The Linux job in `.github/workflows/ci.yml` runs the unit tests (including the
+release-workflow tests that need bash) and `audio.spec.ts` + `liveaudio.spec.ts` with PulseAudio
+under Xvfb.
 
 ## Project structure
 
@@ -213,6 +215,7 @@ exams.
 
 To rebuild and replace the files of an existing release, run _Actions → Release → Run workflow_
 on its `v*` tag with _publish_ checked: every file, including `SHA256SUMS.txt`, is replaced from
-the new build. For a dry run, leave _publish_ unchecked; the artifacts are attached to the
-workflow run instead. Before upgrading Electron, run the
-[loopback verifier](docs/VERIFY_LOOPBACK.md) with the new version on Windows.
+the new build. An already published release keeps its "Latest" status as it is; a new or draft
+release becomes Latest only if no published release has a higher version. For a dry run, leave
+_publish_ unchecked; the artifacts are attached to the workflow run instead. Before upgrading
+Electron, run the [loopback verifier](docs/VERIFY_LOOPBACK.md) with the new version on Windows.

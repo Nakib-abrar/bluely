@@ -38,7 +38,8 @@ const BUILT_FILES = [...INSTALLERS, `Bluely-Setup-${VERSION}.exe.blockmap`, 'lat
 
 /**
  * Stand-in for the gh CLI. FAKE_GH_STATE is the release's state before the step runs
- * (missing | draft | published); FAKE_GH_FAIL_UPLOAD makes the upload of that file fail.
+ * (missing | draft | published); FAKE_GH_FAIL_UPLOAD makes the upload of that file fail;
+ * FAKE_GH_PUBLISHED lists the tags of the other published releases (what `--jq` would print).
  */
 const FAKE_GH = `#!/usr/bin/env bash
 echo "$*" >> "$FAKE_GH_LOG"
@@ -49,6 +50,8 @@ case "$1 $2" in
   "release upload")
     [ -f "$4" ] || { echo "no such file: $4" >&2; exit 1; }
     if [ "$4" = "$FAKE_GH_FAIL_UPLOAD" ]; then echo "HTTP 502 uploading $4" >&2; exit 1; fi ;;
+  "release list")
+    for t in $FAKE_GH_PUBLISHED; do echo "$t"; done ;;
   "release create" | "release edit") ;;
   *) echo "unexpected gh call: $*" >&2; exit 2 ;;
 esac
@@ -88,6 +91,7 @@ function runStep(s: Step, env: Record<string, string> = {}) {
         FAKE_GH_LOG: join(dir, 'gh.log'),
         FAKE_GH_STATE: 'missing',
         FAKE_GH_FAIL_UPLOAD: '',
+        FAKE_GH_PUBLISHED: '',
         ...env,
       },
     },
@@ -149,7 +153,26 @@ describe.skipIf(process.platform === 'win32')('release workflow publish step', (
     for (const c of calls.filter((c) => c.startsWith('release upload'))) {
       expect(c).toMatch(/ --clobber$/)
     }
-    expect(calls.at(-1)).toBe(`release edit v${VERSION} --draft=false`)
+    expect(calls.at(-1)).toBe(`release edit v${VERSION} --draft=false --latest=true`)
+  })
+
+  it('looks for newer releases among published, non-prerelease ones only', () => {
+    expect(publish().status).toBe(0)
+    const list = ghCalls().find((c) => c.startsWith('release list')) ?? ''
+    expect(list).toContain('--exclude-drafts')
+    expect(list).toContain('--exclude-pre-releases')
+  })
+
+  it.each([
+    ['the first release', 'true', ''],
+    ['older releases only', 'true', 'v1.2.2 v1.1.10 v0.9.0'],
+    ['a fix release for an older line (v1.10.0 > v1.2.3)', 'false', 'v1.2.2 v1.10.0'],
+    ['a newer patch release', 'false', 'v1.2.4'],
+    ['pre-release style tags, which are ignored', 'true', 'v2.0.0-beta.1 nightly'],
+  ])('publishing a new release with %s sets --latest=%s explicitly', (_, latest, published) => {
+    const { status, output } = publish({ FAKE_GH_STATE: 'missing', FAKE_GH_PUBLISHED: published })
+    expect(status, output).toBe(0)
+    expect(ghCalls().at(-1)).toBe(`release edit v${VERSION} --draft=false --latest=${latest}`)
   })
 
   it('uploads the installers before latest.yml, so the updater never points at a missing file', () => {
@@ -160,20 +183,27 @@ describe.skipIf(process.platform === 'win32')('release workflow publish step', (
     }
   })
 
-  it('re-publishing an old, already published release replaces every file from this build', () => {
-    const { status, output } = publish({ FAKE_GH_STATE: 'published' })
+  it('re-publishing an old, already published release replaces every file and never edits it', () => {
+    // Any edit would send make_latest (API default: true) and could mark this old release Latest.
+    const { status, output } = publish({ FAKE_GH_STATE: 'published', FAKE_GH_PUBLISHED: 'v2.0.0' })
     expect(status, output).toBe(0)
     expect(ghCalls().some((c) => c.startsWith('release create'))).toBe(false)
     expect(new Set(uploads())).toEqual(new Set([...BUILT_FILES, 'SHA256SUMS.txt']))
-    expect(ghCalls().at(-1)).toBe(`release edit v${VERSION} --draft=false`)
+    expect(uploads().at(-1)).toBe('SHA256SUMS.txt')
+    expect(ghCalls().some((c) => c.startsWith('release edit'))).toBe(false)
+    expect(output).toContain('keeps its Latest status')
   })
 
-  it('finishes a draft left by an earlier failed run', () => {
+  it('finishes a draft left by an earlier failed run, Latest only if nothing newer exists', () => {
     const { status, output } = publish({ FAKE_GH_STATE: 'draft' })
     expect(status, output).toBe(0)
     expect(ghCalls().some((c) => c.startsWith('release create'))).toBe(false)
     expect(new Set(uploads())).toEqual(new Set([...BUILT_FILES, 'SHA256SUMS.txt']))
-    expect(ghCalls().at(-1)).toBe(`release edit v${VERSION} --draft=false`)
+    expect(ghCalls().at(-1)).toBe(`release edit v${VERSION} --draft=false --latest=true`)
+
+    rmSync(join(dir, 'gh.log'))
+    expect(publish({ FAKE_GH_STATE: 'draft', FAKE_GH_PUBLISHED: 'v1.3.0' }).status).toBe(0)
+    expect(ghCalls().at(-1)).toBe(`release edit v${VERSION} --draft=false --latest=false`)
   })
 
   it('a failed upload fails the job before the checksums are attached or the release is published', () => {
