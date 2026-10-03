@@ -106,7 +106,8 @@ async function start(): Promise<void> {
   registerCoreHandlers(ctx, { quit })
   features = wireFeatures(ctx)
   const stubbed = registerStubHandlers()
-  if (stubbed.length) log.debug(`IPC channels without a feature handler: ${stubbed.join(', ')}`)
+  // Every contract channel should have a feature handler; a stub left over is a wiring bug.
+  if (stubbed.length) log.warn(`IPC channels without a feature handler: ${stubbed.join(', ')}`)
 
   const openMainWindow = (startHidden: boolean): BrowserWindow => {
     const win = createMainWindow({
