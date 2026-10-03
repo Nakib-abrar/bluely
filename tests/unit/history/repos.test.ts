@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parseStoredError, tokensPerSecond } from '@main/db/repos/aiMessagesRepo'
 import { parseSummaryJson } from '@main/db/repos/sessionsRepo'
 import { AppError } from '@main/errors'
-import { count, DAY, ftsRefs, line, makeRepos, seedSession } from './fixtures'
+import { count, ftsRefs, line, makeRepos, seedSession } from './fixtures'
 
 describe('SessionsRepo', () => {
   it('creates an active, untitled session and reads it back', () => {
@@ -184,19 +184,12 @@ describe('SessionsRepo', () => {
     }
   })
 
-  it('deletes sessions older than a cutoff but never the live one', () => {
+  it('has no bulk delete that would leave saved screenshots behind', () => {
+    // A plain SQL "delete older than" removed meetings but not their screenshot folders.
+    // Deleting by age is applyRetention's job (see retention.test.ts), which removes both.
     const r = makeRepos()
-    const now = 100 * DAY
-    seedSession(r, { id: 'old', startedAt: now - 40 * DAY })
-    seedSession(r, { id: 'live', startedAt: now - 40 * DAY, status: 'active' })
-    seedSession(r, { id: 'new', startedAt: now - 10 * DAY })
-    expect(r.sessions.deleteOlderThan(now - 30 * DAY)).toBe(1)
-    expect(
-      r.sessions
-        .list()
-        .map((s) => s.id)
-        .sort(),
-    ).toEqual(['live', 'new'])
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(r.sessions))
+    expect(methods.filter((m) => /^delete/i.test(m))).toEqual(['delete'])
   })
 
   it('finds unfinished sessions oldest first', () => {

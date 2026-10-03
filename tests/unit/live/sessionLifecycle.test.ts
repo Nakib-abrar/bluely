@@ -295,6 +295,31 @@ describe('SessionManager: auto-suggest around stop and echo (live F3, F4)', () =
     expect(h.autoCards()).toHaveLength(0)
   })
 
+  it('a question transcribed while the drain still waits for another segment starts nothing', async () => {
+    // The scheduler's own gate (status 'live'), not the cancel after the drain: here the
+    // drain is still waiting for a slow segment when the question's debounce runs out.
+    const h = setup()
+    ;(h.overlay as { window: unknown }).window = {}
+    const { sessionId } = await h.live()
+    const stopping = h.session.stop()
+    expect(h.lastState().status).toBe('stopping')
+    // The overlay flushes trailing speech of both channels, then reports audio stopped.
+    const slow = h.segment(sessionId, 'me', 1500, 800)
+    const question = h.segment(sessionId, 'them', 0)
+    h.session.audioStopped(sessionId)
+    await sleep(0)
+    h.queue().deliver(question, 'Does that timeline work for you?')
+    // Past the auto-suggest debounce (700 ms from the end of their speech).
+    await sleep(900)
+    expect(h.lastState().status).toBe('stopping')
+    expect(h.autoRequests()).toHaveLength(0)
+    expect(h.autoCards()).toHaveLength(0)
+    h.queue().deliver(slow, 'Okay, I will check.')
+    await stopping
+    await h.session.whenPostCallIdle()
+    expect(h.autoRequests()).toHaveLength(0)
+  })
+
   it('speaker echo of their continuation does not cancel the pending auto-suggestion', async () => {
     const h = setup()
     const { sessionId } = await h.live()

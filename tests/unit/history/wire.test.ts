@@ -233,6 +233,35 @@ describe('wireHistory', () => {
     expect(existsSync(join(shots, 'b', 'card.jpg'))).toBe(true)
   })
 
+  it('an email the user writes clears only the email error of a failed post-call run', async () => {
+    const f = wire()
+    f.sessions.create({ id: 's', modeId: null, startedAt: 1 })
+    f.sessions.setStatus('s', 'done')
+    const write = async (postCallError: string | null) => {
+      f.sessions.updateSummaryJson('s', { postCallError })
+      await ok('sessions:updateEmail', { id: 's', subject: 'Mine', body: 'Written by me' })
+      return f.sessions.getSummaryJson('s').postCallError
+    }
+    // The failed-parts banner no longer reports the email, nor retries it over the user's text.
+    expect(await write('notes: Out of credits · email: Provider said no · request id 7')).toBe(
+      'notes: Out of credits',
+    )
+    expect(await write('email: Out of credits')).toBeNull()
+    // Other failures, and a message about the whole run, stay as they are.
+    expect(await write('notes: Out of credits · actions: Timed out')).toBe(
+      'notes: Out of credits · actions: Timed out',
+    )
+    expect(await write('Nothing was transcribed.')).toBe('Nothing was transcribed.')
+    expect(f.sessions.getSummaryJson('s')).toMatchObject({
+      email: { subject: 'Mine', body: 'Written by me' },
+      emailEdited: true,
+    })
+    // A blank email (typed, then cleared) is no email: the failure stays, and so does Retry.
+    f.sessions.updateSummaryJson('s', { postCallError: 'email: Out of credits' })
+    await ok('sessions:updateEmail', { id: 's', subject: ' ', body: '\n' })
+    expect(f.sessions.getSummaryJson('s').postCallError).toBe('email: Out of credits')
+  })
+
   it('saves the edited follow-up email to summary_json and the search index', async () => {
     const f = wire()
     f.sessions.create({ id: 's', modeId: null, startedAt: 1 })
