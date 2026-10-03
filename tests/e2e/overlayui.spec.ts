@@ -196,6 +196,13 @@ test.beforeAll(async () => {
     await new Promise((r) => setTimeout(r, 100))
   }
   expect(overlay, 'overlay window opened').toBeTruthy()
+  // The panel's height follows the screen's work area (App.tsx panelHeight). Pin it to a
+  // 1000 px work area so the layout assertions mean the same on every machine (CI runners have
+  // smaller screens than the 1600×1000 Xvfb display); the short-screen test covers small ones.
+  await overlay.addInitScript(() => {
+    Object.defineProperty(Screen.prototype, 'availHeight', { configurable: true, get: () => 1000 })
+  })
+  await overlay.reload()
   await overlay.waitForLoadState('domcontentloaded')
   await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
 })
