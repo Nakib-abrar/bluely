@@ -12,6 +12,7 @@ import {
   keyEventToAccelerator,
   keybindDisplay,
   normalizeAccelerator,
+  storedKeybindDisplay,
   usableAccelerator,
 } from '@shared/keybinds'
 
@@ -169,5 +170,35 @@ describe('keybinds', () => {
     expect(isReserved('Ctrl+Enter')).toBe(false)
     expect(acceleratorToKeys('CommandOrControl+Enter')).toEqual(['Ctrl', '↵'])
     expect(keybindDisplay('moveOverlay', 'CommandOrControl')).toEqual(['Ctrl', '↑↓←→'])
+  })
+
+  it('keybindDisplay: hints show what a bind fires on, and nothing for an "Invalid shortcut"', () => {
+    // Canonical order, as main registers it.
+    expect(keybindDisplay('askAssist', 'shift+ctrl+enter')).toEqual(['Ctrl', 'Shift', '↵'])
+    expect(keybindDisplay('scrollChat', 'alt+ctrl')).toEqual(['Ctrl', 'Alt', '↑↓'])
+    expect(keybindDisplay('devPanel', 'F9')).toEqual(['F9'])
+    // Hand-edited values main does not register (Settings marks them "Invalid shortcut"): the
+    // overlay's keycap hints must not advertise them.
+    expect(keybindDisplay('clearChat', 'Shift+R')).toEqual([])
+    expect(keybindDisplay('askAssist', 'Shift+Enter')).toEqual([])
+    expect(keybindDisplay('scrollChat', 'Shift')).toEqual([])
+    expect(keybindDisplay('actionSay', 'Shift+1')).toEqual([])
+    expect(keybindDisplay('devPanel', 'Ctrl+C')).toEqual([])
+    expect(keybindDisplay('moveOverlay', 'Ctrl+Up')).toEqual([])
+    expect(keybindDisplay('devPanel', null)).toEqual([])
+    // Settings still shows the stored value as written (dimmed, next to the badge).
+    expect(storedKeybindDisplay('clearChat', 'Shift+R')).toEqual(['Shift', 'R'])
+    expect(storedKeybindDisplay('devPanel', 'Ctrl+C')).toEqual(['Ctrl', 'C'])
+    expect(storedKeybindDisplay('scrollChat', 'Shift')).toEqual(['Shift', '↑↓'])
+    expect(storedKeybindDisplay('devPanel', null)).toEqual([])
+    // One rule: a hint exists exactly when the bind does something.
+    const values = ['Ctrl+R', 'Shift+R', 'Alt', 'Shift', 'Ctrl+C', 'F7', 'R', 'Ctrl+Up', '', null]
+    for (const def of KEYBIND_DEFS) {
+      for (const value of [def.defaultAccelerator, ...values]) {
+        expect(keybindDisplay(def.id, value).length > 0, `${def.id} = ${value}`).toBe(
+          usableAccelerator(def.id, value) !== null,
+        )
+      }
+    }
   })
 })

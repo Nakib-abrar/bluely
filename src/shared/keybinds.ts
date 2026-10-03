@@ -155,14 +155,29 @@ export function acceleratorToKeys(accelerator: string): string[] {
     .map((p) => KEY_DISPLAY[p] ?? p)
 }
 
-/** Display keycaps for a keybind, including the arrow family suffix. */
-export function keybindDisplay(id: KeybindId, accelerator: string | null): string[] {
-  if (!accelerator) return []
+/**
+ * Keycaps for a stored keybind value as written, including the arrow family suffix, even when the
+ * value does nothing. Only for Settings › Keybinds, which shows such a value dimmed next to
+ * "Invalid shortcut"; hints elsewhere use keybindDisplay.
+ */
+export function storedKeybindDisplay(id: KeybindId, value: string | null | undefined): string[] {
+  if (!value) return []
   const def = getKeybindDef(id)
-  const keys = acceleratorToKeys(accelerator)
+  const keys = acceleratorToKeys(value)
   if (def.kind === 'arrows4') return [...keys, '↑↓←→']
   if (def.kind === 'arrows2') return [...keys, '↑↓']
   return keys
+}
+
+/**
+ * Keycap hints for what a keybind really fires on (canonical order, arrow family suffix
+ * included), or none when it does nothing: disabled, unusable or reserved (see
+ * usableAccelerator). So the overlay's hints never advertise a hand-edited Shift+R or Ctrl+C
+ * that main does not register and Settings marks "Invalid shortcut".
+ */
+export function keybindDisplay(id: KeybindId, value: string | null | undefined): string[] {
+  const usable = usableAccelerator(id, value)
+  return usable === null ? [] : storedKeybindDisplay(id, usable)
 }
 
 // ───────────────────────── accelerator logic (pure; used by main + Settings) ─────────────────────────

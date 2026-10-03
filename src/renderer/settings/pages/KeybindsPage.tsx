@@ -8,6 +8,7 @@ import {
   keybindDisplay,
   keyEventToAccelerator,
   normalizeAccelerator,
+  storedKeybindDisplay,
   usableAccelerator,
   type KeybindId,
   type KeybindMap,
@@ -230,7 +231,9 @@ export function KeybindsPage() {
                   </span>
                 ) : value ? (
                   <Keys
-                    keys={keybindDisplay(def.id, value)}
+                    keys={
+                      valid ? keybindDisplay(def.id, value) : storedKeybindDisplay(def.id, value)
+                    }
                     className={cn(!valid && 'opacity-60')}
                   />
                 ) : (
