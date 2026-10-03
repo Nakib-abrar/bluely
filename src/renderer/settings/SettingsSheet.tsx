@@ -132,7 +132,7 @@ function PageArea({ page }: { page: SettingsPage }) {
       className="min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] focus:outline-none focus-visible:outline-none"
       data-testid={`settings-page-${page}`}
     >
-      <div className="px-8 pt-7 pb-10">{renderPage(page)}</div>
+      <div className="px-8 pt-7 pb-10 max-[900px]:px-6">{renderPage(page)}</div>
     </div>
   )
 }
@@ -154,9 +154,13 @@ export function SettingsSheet({ open, page, onOpenChange, onNavigate }: Settings
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange} title={t('settings.title')}>
+      {/*
+        Narrower below 900 px (the default window on 1366×768 or 150 % scaling) so the pages keep
+        room for their tables; scrolls when the window is too short for every item.
+      */}
       <nav
         aria-label={t('settings.nav.label')}
-        className="flex w-[248px] shrink-0 flex-col border-r border-line bg-panel-2 px-3 pt-3 pb-3"
+        className="flex w-[248px] shrink-0 flex-col overflow-y-auto border-r border-line bg-panel-2 px-3 pt-3 pb-3 max-[900px]:w-[196px] max-[900px]:px-2"
         data-testid="settings-nav"
       >
         <DialogClose

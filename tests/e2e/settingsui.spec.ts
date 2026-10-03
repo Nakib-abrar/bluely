@@ -123,7 +123,21 @@ const STATS: ModelStat[] = [
     tokensPerSecP50: 61,
     updatedAt: 1,
   },
+  // Same model served by a second provider: main keeps one rolling row per (model, provider).
+  {
+    model: 'meta-llama/llama-3.3-70b-instruct',
+    provider: 'Cerebras',
+    samples: 9,
+    ttftP50: 168,
+    ttftP90: 301,
+    totalP50: 610,
+    tokensPerSecP50: 512,
+    updatedAt: 1,
+  },
 ]
+
+/** After a latency test main re-sorts by last update: the rows come back in another order. */
+const STATS_AFTER_RUN: ModelStat[] = [STATS[3]!, STATS[2]!, STATS[0]!, STATS[1]!]
 
 const CUSTOM_MODE: Mode = {
   id: 'custom-acme',
@@ -172,19 +186,47 @@ const FILES: KnowledgeFile[] = [
 ]
 
 const KEYBIND_STATUS: KeybindStatus[] = [
-  { id: 'toggleOverlay', accelerator: 'CommandOrControl+\\', registered: true, error: null },
-  { id: 'askAssist', accelerator: 'CommandOrControl+Enter', registered: true, error: null },
+  {
+    id: 'toggleOverlay',
+    accelerator: 'CommandOrControl+\\',
+    registered: true,
+    error: null,
+    reason: null,
+  },
+  {
+    id: 'askAssist',
+    accelerator: 'CommandOrControl+Enter',
+    registered: true,
+    error: null,
+    reason: null,
+  },
+  // What main reports for Move Bluely while the overlay is hidden (no live session).
+  {
+    id: 'moveOverlay',
+    accelerator: 'CommandOrControl',
+    registered: false,
+    error: null,
+    reason: 'inactive',
+  },
   {
     id: 'actionRecap',
     accelerator: 'CommandOrControl+Shift+3',
     registered: false,
     error: 'Taken by another app',
+    reason: 'taken',
   },
 ]
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** Past meetings, by age in days (for the retention confirmation). */
+const SESSION_AGES = [10, 45, 120, 200]
 
 const FIXTURES = {
   models: MODELS,
   stats: STATS,
+  statsAfterRun: STATS_AFTER_RUN,
+  sessionAges: SESSION_AGES,
+  dayMs: DAY_MS,
   modes: [...BUILTIN_MODES, CUSTOM_MODE],
   files: FILES,
   keybindStatus: KEYBIND_STATUS,
@@ -209,6 +251,16 @@ async function installFakes(target: ElectronApplication): Promise<void> {
       hasKey: false,
       modes: fx.modes.map((m) => ({ ...m })),
       files: fx.files.map((f) => ({ ...f })),
+      statsCalls: 0,
+      sessions: fx.sessionAges.map((days, i) => ({
+        id: `past-${i}`,
+        title: `Meeting ${days} days ago`,
+        modeId: null,
+        startedAt: Date.now() - days * fx.dayMs,
+        endedAt: null,
+        durationMs: null,
+        status: 'done',
+      })),
     }
     ;(globalThis as unknown as { __bluely: typeof state }).__bluely = state
     const send = (event: string, payload: unknown) => {
@@ -305,7 +357,7 @@ async function installFakes(target: ElectronApplication): Promise<void> {
         reason: 'OpenRouter does not list it right now.',
       },
     ])
-    fake('models:getStats', () => fx.stats)
+    fake('models:getStats', () => (state.statsCalls++ === 0 ? fx.stats : fx.statsAfterRun))
     fake('models:runLatencyTest', (p) => {
       const models = p['models'] as string[]
       const runId = 'run-1'
@@ -398,6 +450,15 @@ async function installFakes(target: ElectronApplication): Promise<void> {
       path: 'C:\\Users\\Nadia\\Documents\\Bluely export 2026-10-02.zip',
     }))
     fake('data:deleteAll', () => undefined)
+    // Same contract as main: newest first, started before `before`, at most `limit`.
+    fake('sessions:list', (p) => {
+      const before = typeof p['before'] === 'number' ? p['before'] : Infinity
+      const limit = typeof p['limit'] === 'number' ? p['limit'] : 50
+      return state.sessions
+        .filter((x) => x.startedAt < before)
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .slice(0, limit)
+    })
     fake('audio:testTranscribe', (p) => {
       const wav = p['wav'] as Uint8Array
       const riff = String.fromCharCode(...Array.from(wav.slice(0, 4)))
@@ -448,6 +509,23 @@ async function shot(name: string) {
 }
 
 const content = () => page.locator('[data-testid^="settings-page-"]')
+
+async function resize(width: number, height: number) {
+  await app.evaluate(
+    ({ BrowserWindow }, size) => {
+      BrowserWindow.getAllWindows()[0]?.setSize(size.width, size.height)
+    },
+    { width, height },
+  )
+  await expect.poll(() => page.evaluate(() => [innerWidth, innerHeight])).toEqual([width, height])
+}
+
+/** Text of the elements whose content is cut off (ellipsis) instead of shown in full. */
+async function clipped(elements: ReturnType<Page['locator']>): Promise<string[]> {
+  return elements.evaluateAll((els) =>
+    els.filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent ?? ''),
+  )
+}
 
 test.describe.configure({ mode: 'serial', timeout: 180_000 })
 
@@ -562,6 +640,18 @@ test('general: version, update flow, theme, toggles and advanced', async () => {
     .toEqual({
       id: 'builtin-sales',
     })
+  // main echoes the switch through settings; later the header Mode pill (which does not use the
+  // Settings store) switches back to General. Settings must follow, not resurrect Sales.
+  const activeMode = c.getByRole('combobox', { name: 'Active Mode' })
+  const setActiveModeId = (id: string) =>
+    page.evaluate(
+      (modeId) => window.bluely.invoke('settings:update', { patch: { activeModeId: modeId } }),
+      id,
+    )
+  await setActiveModeId('builtin-sales')
+  await expect(activeMode).toContainText('Sales call')
+  await setActiveModeId('builtin-general')
+  await expect(activeMode).toContainText('General meeting')
 
   // Advanced is collapsed by default; sliders save on commit.
   await expect(c.getByRole('slider', { name: 'Max segment length' })).toBeHidden()
@@ -688,7 +778,23 @@ test('ai models: key save + test, pickers filter by role, routing, latency test,
   await expect(c.getByTestId('month-spend')).toContainText(
     'LLM $0.31 · Transcription $0.11 · 128 requests',
   )
-  await expect(c.getByTestId('rolling-table')).toContainText('Anthropic')
+  // Rolling averages: one row per (model, provider), refreshed (re-sorted) after the run without
+  // stale or duplicated rows.
+  const rolling = c.getByTestId('rolling-table')
+  await expect(rolling).toContainText('Anthropic')
+  await expect
+    .poll(async () => (await calls('models:getStats')).length, { timeout: 10_000 })
+    .toBeGreaterThanOrEqual(2)
+  const rollingRows = rolling.locator('tbody tr')
+  await expect(rollingRows).toHaveCount(4)
+  await expect(rollingRows.nth(0)).toContainText('Llama 3.3 70B Instruct')
+  await expect(rollingRows.nth(0)).toContainText('Cerebras')
+  await expect(rollingRows.nth(0)).toContainText('168 ms')
+  await expect(rollingRows.nth(1)).toContainText('Llama 3.3 70B Instruct')
+  await expect(rollingRows.nth(1)).toContainText('Groq')
+  await expect(rollingRows.nth(1)).toContainText('212 ms')
+  await expect(rollingRows.nth(2)).toContainText('Claude Sonnet 4.5')
+  await expect(rollingRows.nth(3)).toContainText('Gemini 2.5 Flash')
   await table.scrollIntoViewIfNeeded()
   await shot('models-latency-dark')
 })
@@ -762,6 +868,9 @@ test('keybinds: capture, conflicts, disable, Alt+Enter preset, reset', async () 
   const ask = c.getByTestId('keybind-askAssist')
   await expect(ask).toContainText('Ask Bluely / Assist')
   await expect(c.getByTestId('keybind-actionRecap')).toContainText('Taken by another app')
+  // Move Bluely is only registered while the overlay is visible: inactive, not taken.
+  await expect(c.getByTestId('keybind-moveOverlay')).toContainText('Global')
+  await expect(c.getByTestId('keybind-moveOverlay')).not.toContainText('Taken by another app')
   await shot('keybinds-dark')
 
   // Conflict: Ctrl+Shift+1 belongs to "What should I say?" → error, not saved, stays in capture.
@@ -786,6 +895,17 @@ test('keybinds: capture, conflicts, disable, Alt+Enter preset, reset', async () 
   await page.keyboard.press('Control+KeyC')
   await expect(ask).toContainText('is reserved')
   await page.keyboard.press('Escape')
+
+  // Shift alone would swallow typing in every app: refused, and capture continues.
+  const say = c.getByTestId('keybind-actionSay')
+  await say.getByRole('button', { name: 'Rebind' }).click()
+  await page.keyboard.press('Shift+KeyS')
+  await expect(say).toContainText('Shift+S would block typing that character in other apps')
+  expect((await settingsNow()).keybinds.actionSay).toBe('CommandOrControl+Shift+1')
+  await page.keyboard.press('Control+Shift+KeyS')
+  await expect
+    .poll(async () => (await settingsNow()).keybinds.actionSay)
+    .toBe('CommandOrControl+Shift+S')
 
   // Disable / enable.
   await c.getByRole('switch', { name: 'Enable Recap' }).click()
@@ -840,9 +960,26 @@ test('profile, language and privacy pages', async () => {
   await expect(c.getByTestId('data-dir')).toHaveText('C:\\Users\\Nadia\\AppData\\Roaming\\Bluely')
   await c.getByRole('button', { name: 'Open folder' }).click()
   await expect.poll(async () => (await calls('app:openDataFolder')).length).toBe(1)
-  await c.getByRole('combobox', { name: 'Keep sessions' }).click()
+  // A shorter retention deletes meetings right away: it asks first, with the count.
+  const keep = c.getByRole('combobox', { name: 'Keep sessions' })
+  await keep.click()
   await page.getByRole('option', { name: '90 days' }).click()
+  const ask = page.getByRole('dialog', { name: 'Keep sessions for 90 days?' })
+  await expect(ask).toContainText('2 meetings older than 90 days will be permanently deleted now')
+  await shot('privacy-retention-confirm-dark')
+  await ask.getByRole('button', { name: 'Cancel' }).click()
+  await expect(ask).toBeHidden()
+  await expect(keep).toContainText('Forever')
+  expect((await settingsNow()).privacy.retentionDays).toBe(0)
+  await keep.click()
+  await page.getByRole('option', { name: '90 days' }).click()
+  await ask.getByRole('button', { name: 'Delete old meetings' }).click()
   await expect.poll(async () => (await settingsNow()).privacy.retentionDays).toBe(90)
+  // Keeping more history deletes nothing: saved without asking.
+  await keep.click()
+  await page.getByRole('option', { name: '365 days' }).click()
+  await expect.poll(async () => (await settingsNow()).privacy.retentionDays).toBe(365)
+  await expect(page.getByRole('dialog', { name: /Keep sessions for/ })).toHaveCount(0)
   await c.getByRole('button', { name: 'Export…' }).click()
   await expect(c.getByText(/Saved to C:\\Users\\Nadia\\Documents/)).toBeVisible()
   await expect(c.getByTestId('sent-list')).toContainText(
@@ -887,6 +1024,46 @@ test('release notes, help and quit', async () => {
   await dialog.getByRole('button', { name: 'Quit Bluely' }).click()
   await expect.poll(async () => (await calls('app:quit')).length).toBe(1)
   await page.keyboard.press('Escape')
+})
+
+test('small windows: keybind names, model names and Quit stay readable', async () => {
+  try {
+    // The default main window on 1366×768, or on 1920×1080 at 150 % scaling.
+    await resize(860, 600)
+    await go('#settings/keybinds')
+    const labels = content().getByTestId('keybind-label')
+    await expect(labels).toHaveCount(10)
+    expect(await clipped(labels)).toEqual([])
+    await shot('keybinds-860-dark')
+
+    await go('#settings/models')
+    for (const id of ['latency-table', 'rolling-table']) {
+      const names = content().getByTestId(id).locator('tbody td:first-child')
+      await expect(names.first()).toBeVisible()
+      expect(await clipped(names)).toEqual([])
+    }
+    // The provider moves under the model name when its column is dropped.
+    await expect(content().getByTestId('rolling-table').locator('tbody tr').first()).toContainText(
+      'Cerebras',
+    )
+    await content().getByTestId('rolling-table').scrollIntoViewIfNeeded()
+    await shot('models-860-dark')
+
+    // Minimum window size: still no clipped keybind names, and Quit can be reached.
+    await resize(780, 540)
+    await go('#settings/keybinds')
+    await expect(labels).toHaveCount(10)
+    expect(await clipped(labels)).toEqual([])
+    const nav = page.getByTestId('settings-nav')
+    await nav.evaluate((el) => el.scrollTo({ top: el.scrollHeight }))
+    const navBox = await nav.boundingBox()
+    const quitBox = await page.getByTestId('settings-quit').boundingBox()
+    expect(navBox && quitBox).toBeTruthy()
+    expect(quitBox!.y + quitBox!.height).toBeLessThanOrEqual(navBox!.y + navBox!.height + 1)
+    await shot('settings-780x540-dark')
+  } finally {
+    await resize(1180, 800)
+  }
 })
 
 test('light theme renders every page', async () => {

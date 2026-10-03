@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_KEYBINDS, getKeybindDef } from '@shared/keybinds'
-import { describeRebindOutcome, evaluateRebind, labelOf } from '@renderer/settings/lib/rebind'
+import type { KeybindStatus } from '@shared/types'
+import {
+  describeRebindOutcome,
+  evaluateRebind,
+  keybindBadge,
+  labelOf,
+} from '@renderer/settings/lib/rebind'
 
 const map = { ...DEFAULT_KEYBINDS }
 
@@ -37,6 +43,20 @@ describe('evaluateRebind', () => {
     })
   })
 
+  it('refuses Shift-only combinations (typing / text selection in every app)', () => {
+    // Pressing Shift then S before Ctrl yields "Shift+S" in capture mode.
+    expect(evaluateRebind(map, 'actionSay', 'Shift+S')).toEqual({
+      kind: 'invalid',
+      accelerator: 'Shift+S',
+      problem: 'shiftOnly',
+    })
+    expect(evaluateRebind(map, 'moveOverlay', 'Shift')).toMatchObject({
+      kind: 'invalid',
+      problem: 'shiftOnly',
+    })
+    expect(evaluateRebind(map, 'actionSay', 'Ctrl+Shift+S').kind).toBe('ok')
+  })
+
   it('handles arrow families (modifier prefix only)', () => {
     expect(evaluateRebind(map, 'moveOverlay', 'Alt').kind).toBe('ok')
     expect(evaluateRebind(map, 'moveOverlay', 'Alt+K').kind).toBe('invalid')
@@ -67,7 +87,87 @@ describe('describeRebindOutcome', () => {
     ).toBe('info')
     expect(describeRebindOutcome(ask, { kind: 'ok', accelerator: 'Alt+K' })).toBeNull()
   })
+  it('explains why Shift alone is refused', () => {
+    expect(
+      describeRebindOutcome(
+        getKeybindDef('actionSay'),
+        evaluateRebind(map, 'actionSay', 'Shift+S'),
+      ),
+    ).toEqual({
+      tone: 'error',
+      text: 'Shift+S would block typing that character in other apps. Add Ctrl, Alt or Win.',
+    })
+    expect(
+      describeRebindOutcome(
+        getKeybindDef('moveOverlay'),
+        evaluateRebind(map, 'moveOverlay', 'Shift'),
+      ),
+    ).toEqual({
+      tone: 'error',
+      text: 'Shift+arrows selects text in other apps. Add Ctrl, Alt or Win.',
+    })
+    expect(
+      describeRebindOutcome(getKeybindDef('actionSay'), evaluateRebind(map, 'actionSay', 'K'))
+        ?.text,
+    ).toBe('Use Ctrl, Alt or Win with a key (F-keys also work on their own).')
+  })
   it('labels binds through i18n', () => {
     expect(labelOf('toggleOverlay')).toBe('Show/hide Bluely')
+  })
+})
+
+describe('keybindBadge', () => {
+  const move = getKeybindDef('moveOverlay')
+  const recap = getKeybindDef('actionRecap')
+  const status = (s: Partial<KeybindStatus> & Pick<KeybindStatus, 'id'>): KeybindStatus => ({
+    accelerator: null,
+    registered: true,
+    error: null,
+    ...s,
+  })
+
+  it('shows nothing for Move Bluely while the overlay is hidden (inactive by design)', () => {
+    // Exactly what main reports with no live session.
+    const inactive = status({
+      id: 'moveOverlay',
+      accelerator: 'CommandOrControl',
+      registered: false,
+      error: null,
+      reason: 'inactive',
+    })
+    expect(keybindBadge(move, 'CommandOrControl', inactive)).toBeNull()
+    // Also when the reason is missing: no error message means no problem to show.
+    expect(keybindBadge(move, 'CommandOrControl', { ...inactive, reason: undefined })).toBeNull()
+  })
+
+  it('flags binds main reports as taken, duplicated or rejected', () => {
+    const taken = status({
+      id: 'actionRecap',
+      accelerator: 'CommandOrControl+Shift+3',
+      registered: false,
+      error: 'Taken by another app',
+      reason: 'taken',
+    })
+    expect(keybindBadge(recap, 'CommandOrControl+Shift+3', taken)).toEqual({
+      tone: 'warning',
+      text: 'Taken by another app',
+    })
+    expect(
+      keybindBadge(recap, 'CommandOrControl+Shift+3', { ...taken, reason: 'duplicate' }),
+    ).toEqual({ tone: 'warning', text: 'Used by another Bluely shortcut' })
+    expect(
+      keybindBadge(recap, 'CommandOrControl+Shift+3', { ...taken, reason: 'invalid' }),
+    ).toEqual({ tone: 'danger', text: 'Invalid shortcut' })
+    // A status for the previous accelerator is stale: no badge until main reports the new one.
+    expect(keybindBadge(recap, 'Alt+Shift+3', taken)).toBeNull()
+  })
+
+  it('marks disabled and locally invalid values without asking main', () => {
+    expect(keybindBadge(recap, null, undefined)).toEqual({ tone: 'neutral', text: 'Disabled' })
+    expect(keybindBadge(recap, 'Shift+3', undefined)).toEqual({
+      tone: 'danger',
+      text: 'Invalid shortcut',
+    })
+    expect(keybindBadge(recap, 'CommandOrControl+Shift+3', undefined)).toBeNull()
   })
 })

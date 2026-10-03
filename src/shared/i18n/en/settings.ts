@@ -281,8 +281,10 @@ export const settings = {
     disabled: 'Disabled',
     taken: 'Taken by another app',
     invalid: 'Invalid shortcut',
-    errInvalid: 'Use at least one modifier (Ctrl, Alt, Shift or Win) with a key.',
-    errInvalidArrows: 'Hold at least one modifier while pressing an arrow key.',
+    errInvalid: 'Use Ctrl, Alt or Win with a key (F-keys also work on their own).',
+    errInvalidArrows: 'Hold Ctrl, Alt or Win while pressing an arrow key.',
+    errShiftOnly: '{keys} would block typing that character in other apps. Add Ctrl, Alt or Win.',
+    errShiftOnlyArrows: 'Shift+arrows selects text in other apps. Add Ctrl, Alt or Win.',
     errReserved: '{keys} is reserved by Windows or common editing. Pick another one.',
     errConflict: '{keys} is already used by “{other}”.',
     infoFocusOnly:
@@ -334,6 +336,14 @@ export const settings = {
     retentionDescription: 'Older sessions are deleted automatically',
     retentionForever: 'Forever',
     retentionDays: '{n} days',
+    retentionConfirmTitle: 'Keep sessions for {days} days?',
+    retentionConfirmOne:
+      '1 meeting older than {days} days will be permanently deleted now, with its transcript, notes and action items. This cannot be undone.',
+    retentionConfirmMany:
+      '{count} meetings older than {days} days will be permanently deleted now, with their transcripts, notes and action items. This cannot be undone.',
+    retentionConfirmUnknown:
+      'Meetings older than {days} days will be permanently deleted now, with their transcripts, notes and action items. This cannot be undone.',
+    retentionConfirm: 'Delete old meetings',
     screenshotsTitle: 'Save screenshots',
     screenshotsDescription: 'Keep screenshots used by Assist with the session (off: discarded)',
     exportTitle: 'Export all data',

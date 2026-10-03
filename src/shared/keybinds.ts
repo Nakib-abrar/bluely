@@ -279,16 +279,40 @@ export function normalizeAccelerator(acc: string): string {
 }
 
 /**
- * Validates an accelerator for a keybind kind. Global single binds need at least one modifier
- * (except F-keys). Arrow families store only the modifier prefix.
+ * Why an accelerator cannot be used for a keybind kind:
+ * - 'malformed': unknown key names, two keys, or (for single binds) no key at all.
+ * - 'noModifier': a key without any modifier (only F-keys may stand alone).
+ * - 'shiftOnly': Shift is the only modifier. Shift+letter/digit is ordinary typing and
+ *   Shift+arrows is text selection, so binding it would swallow those keystrokes in every app.
+ */
+export type AcceleratorProblem = 'malformed' | 'noModifier' | 'shiftOnly'
+
+/** Modifiers that make a combination a shortcut rather than typing (Ctrl, Alt, AltGr, Win). */
+const SHORTCUT_MODIFIERS = new Set(['CommandOrControl', 'Alt', 'AltGr', 'Super'])
+
+/** The reason `acc` is not a usable accelerator for `kind`, or null when it is fine. */
+export function acceleratorProblem(acc: string, kind: KeybindKind): AcceleratorProblem | null {
+  const p = parseAccelerator(acc)
+  if (!p.valid) return 'malformed'
+  if (kind === 'arrows4' || kind === 'arrows2') {
+    // Arrow families store only the modifier prefix; the arrows are appended later.
+    if (p.key !== null) return 'malformed'
+  } else {
+    if (!p.key) return 'malformed'
+    // F-keys are not typed characters, so they may be used alone or with Shift only.
+    if (/^F\d+$/.test(p.key)) return null
+  }
+  if (p.modifiers.length === 0) return 'noModifier'
+  if (!p.modifiers.some((m) => SHORTCUT_MODIFIERS.has(m))) return 'shiftOnly'
+  return null
+}
+
+/**
+ * Validates an accelerator for a keybind kind. Binds need Ctrl, Alt or Win (Shift alone is
+ * typing); F-keys may stand alone. Arrow families store only the modifier prefix.
  */
 export function isValidAccelerator(acc: string, kind: KeybindKind): boolean {
-  const p = parseAccelerator(acc)
-  if (!p.valid) return false
-  if (kind === 'arrows4' || kind === 'arrows2') return p.key === null && p.modifiers.length > 0
-  if (!p.key) return false
-  const isFKey = /^F\d+$/.test(p.key)
-  return p.modifiers.length > 0 || isFKey
+  return acceleratorProblem(acc, kind) === null
 }
 
 /** All concrete accelerators a keybind registers (arrow families expand to their arrow keys). */

@@ -19,7 +19,13 @@ import { invoke } from '../../lib/ipc'
 import { useSettings } from '../../stores/settings'
 import { PageHeader, StatusLine } from '../components/bits'
 import { describeError } from '../lib/errors'
-import { describeRebindOutcome, evaluateRebind, labelOf, type RowMessage } from '../lib/rebind'
+import {
+  describeRebindOutcome,
+  evaluateRebind,
+  keybindBadge,
+  labelOf,
+  type RowMessage,
+} from '../lib/rebind'
 
 function heldModifiers(e: KeyboardEvent): string[] {
   const keys: string[] = []
@@ -162,8 +168,15 @@ export function KeybindsPage() {
     <div>
       <PageHeader title={t('settings.keybinds.title')} subtitle={t('settings.keybinds.subtitle')} />
 
-      <div className="overflow-hidden rounded-xl border border-line" data-testid="keybind-table">
-        <div className="grid grid-cols-[1fr_190px_150px] items-center gap-3 border-b border-line bg-panel-2 px-4 py-2 text-[11.5px] font-medium text-subtle">
+      {/*
+        One grid for the whole table; header and rows are subgrids, so the shortcut and control
+        columns size to their content yet stay aligned, and the action label gets the rest.
+      */}
+      <div
+        className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-3 overflow-hidden rounded-xl border border-line"
+        data-testid="keybind-table"
+      >
+        <div className="col-span-full grid grid-cols-subgrid items-center border-b border-line bg-panel-2 px-4 py-2 text-[11.5px] font-medium text-subtle">
           <span>{t('settings.keybinds.colAction')}</span>
           <span>{t('settings.keybinds.colShortcut')}</span>
           <span />
@@ -174,106 +187,100 @@ export function KeybindsPage() {
           const label = labelOf(def.id)
           const isCapturing = capturing === def.id
           const valid = value != null && isValidAccelerator(value, def.kind)
-          const taken =
-            def.scope === 'global' &&
-            valid &&
-            status != null &&
-            !status.registered &&
-            status.accelerator != null &&
-            normalizeAccelerator(status.accelerator) === normalizeAccelerator(value)
+          const badge = keybindBadge(def, value, status)
           const message = messages[def.id]
           return (
             <div
               key={def.id}
               data-testid={`keybind-${def.id}`}
               className={cn(
-                'border-b border-line px-4 py-3 transition-colors duration-150 last:border-b-0',
+                'col-span-full grid grid-cols-subgrid items-center border-b border-line px-4 py-3 transition-colors duration-150 last:border-b-0',
                 isCapturing && 'bg-accent-soft',
               )}
             >
-              <div className="grid grid-cols-[1fr_190px_150px] items-center gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-[13.5px] font-medium text-fg">{label}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 text-[11.5px] text-subtle">
-                      {def.scope === 'global' ? (
-                        <Globe size={11} aria-hidden="true" />
-                      ) : (
-                        <AppWindow size={11} aria-hidden="true" />
-                      )}
-                      {def.scope === 'global' ? t('keybinds.global') : t('keybinds.local')}
-                    </span>
-                    {value == null ? (
-                      <Badge>{t('settings.keybinds.disabled')}</Badge>
-                    ) : !valid ? (
-                      <Badge tone="danger">{t('settings.keybinds.invalid')}</Badge>
-                    ) : taken ? (
-                      <Badge tone="warning" title={status?.error ?? undefined}>
-                        {status?.error ?? t('settings.keybinds.taken')}
-                      </Badge>
-                    ) : null}
-                  </div>
+              <div className="min-w-0">
+                <div
+                  className="truncate text-[13.5px] font-medium text-fg"
+                  title={label}
+                  data-testid="keybind-label"
+                >
+                  {label}
                 </div>
-                <div className="min-w-0">
-                  {isCapturing ? (
-                    <span className="inline-flex h-7 items-center gap-1 rounded-lg border border-accent px-2 animate-pulse-dot">
-                      {held.length ? <Keys keys={held} /> : null}
-                      <span className="text-[12px] text-accent-text">…</span>
-                    </span>
-                  ) : value ? (
-                    <Keys
-                      keys={keybindDisplay(def.id, value)}
-                      className={cn(!valid && 'opacity-60')}
-                    />
-                  ) : (
-                    <span className="text-[12.5px] text-subtle">—</span>
-                  )}
-                </div>
-                <div className="flex items-center justify-end gap-1.5">
-                  <Button
-                    size="sm"
-                    variant={isCapturing ? 'ghost' : 'secondary'}
-                    onClick={() => {
-                      setHeld([])
-                      setCapturing(isCapturing ? null : def.id)
-                      if (!isCapturing) setMessage(def.id, null)
-                    }}
-                  >
-                    {isCapturing ? t('settings.keybinds.cancel') : t('settings.keybinds.rebind')}
-                  </Button>
-                  <Switch
-                    checked={value != null}
-                    label={t('settings.keybinds.enable', { label })}
-                    onCheckedChange={(on) => {
-                      setCapturing(null)
-                      if (on) void tryAssign(def.id, def.defaultAccelerator)
-                      else {
-                        setMessage(def.id, null)
-                        void apply({ [def.id]: null })
-                      }
-                    }}
-                  />
-                  <IconButton
-                    size="sm"
-                    label={t('settings.keybinds.resetOne', { label })}
-                    icon={<RotateCcw size={13} />}
-                    disabled={value === def.defaultAccelerator}
-                    onClick={() => {
-                      setCapturing(null)
-                      void tryAssign(def.id, def.defaultAccelerator)
-                    }}
-                  />
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1 text-[11.5px] text-subtle">
+                    {def.scope === 'global' ? (
+                      <Globe size={11} aria-hidden="true" />
+                    ) : (
+                      <AppWindow size={11} aria-hidden="true" />
+                    )}
+                    {def.scope === 'global' ? t('keybinds.global') : t('keybinds.local')}
+                  </span>
+                  {badge ? (
+                    <Badge tone={badge.tone} title={badge.text}>
+                      {badge.text}
+                    </Badge>
+                  ) : null}
                 </div>
               </div>
+              <div className="whitespace-nowrap">
+                {isCapturing ? (
+                  <span className="inline-flex h-7 items-center gap-1 rounded-lg border border-accent px-2 animate-pulse-dot">
+                    {held.length ? <Keys keys={held} /> : null}
+                    <span className="text-[12px] text-accent-text">…</span>
+                  </span>
+                ) : value ? (
+                  <Keys
+                    keys={keybindDisplay(def.id, value)}
+                    className={cn(!valid && 'opacity-60')}
+                  />
+                ) : (
+                  <span className="text-[12.5px] text-subtle">—</span>
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-1.5">
+                <Button
+                  size="sm"
+                  variant={isCapturing ? 'ghost' : 'secondary'}
+                  onClick={() => {
+                    setHeld([])
+                    setCapturing(isCapturing ? null : def.id)
+                    if (!isCapturing) setMessage(def.id, null)
+                  }}
+                >
+                  {isCapturing ? t('settings.keybinds.cancel') : t('settings.keybinds.rebind')}
+                </Button>
+                <Switch
+                  checked={value != null}
+                  label={t('settings.keybinds.enable', { label })}
+                  onCheckedChange={(on) => {
+                    setCapturing(null)
+                    if (on) void tryAssign(def.id, def.defaultAccelerator)
+                    else {
+                      setMessage(def.id, null)
+                      void apply({ [def.id]: null })
+                    }
+                  }}
+                />
+                <IconButton
+                  size="sm"
+                  label={t('settings.keybinds.resetOne', { label })}
+                  icon={<RotateCcw size={13} />}
+                  disabled={value === def.defaultAccelerator}
+                  onClick={() => {
+                    setCapturing(null)
+                    void tryAssign(def.id, def.defaultAccelerator)
+                  }}
+                />
+              </div>
               {isCapturing ? (
-                <div className="mt-1.5 text-[12px] text-accent-text" role="status">
+                <div className="col-span-full mt-1.5 text-[12px] text-accent-text" role="status">
                   {def.kind === 'single'
                     ? t('settings.keybinds.capture')
                     : t('settings.keybinds.captureArrows')}
                 </div>
               ) : null}
               {message ? (
-                <StatusLine tone={message.tone} className="mt-1.5">
+                <StatusLine tone={message.tone} className="col-span-full mt-1.5">
                   {message.text}
                 </StatusLine>
               ) : null}

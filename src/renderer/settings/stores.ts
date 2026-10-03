@@ -44,9 +44,12 @@ interface ModesState {
   error: string | null
   /**
    * The Mode the user just made active, relative to the settings value it replaced. Main updates
-   * settings.activeModeId too; this only bridges the gap (and is ignored once settings move on).
+   * settings.activeModeId too; this only bridges the gap until that echo arrives. It is dropped
+   * as soon as settings.activeModeId moves off `base` (the echo, or a switch made elsewhere such
+   * as the header Mode pill), so it can never resurface when the active Mode later returns to
+   * `base`.
    */
-  activeChoice: { id: string; base: string } | null
+  activeChoice: ActiveChoice | null
   load: () => Promise<void>
   upsert: (mode: Mode) => void
   remove: (id: string) => void
@@ -54,7 +57,25 @@ interface ModesState {
   setActive: (id: string) => Promise<void>
 }
 
+interface ActiveChoice {
+  id: string
+  base: string
+}
+
 let modesSubscribed = false
+let settingsWatched = false
+
+/** Drops the optimistic choice once settings no longer hold the value it was made against. */
+function watchSettingsForChoice(): void {
+  if (settingsWatched) return
+  settingsWatched = true
+  useSettings.subscribe((state) => {
+    const choice = useModes.getState().activeChoice
+    if (choice && state.settings.activeModeId !== choice.base) {
+      useModes.setState({ activeChoice: null })
+    }
+  })
+}
 
 export const useModes = create<ModesState>((set, get) => ({
   modes: [],
@@ -82,22 +103,35 @@ export const useModes = create<ModesState>((set, get) => ({
     }),
   remove: (id) => set((s) => ({ modes: s.modes.filter((m) => m.id !== id) })),
   setActive: async (id) => {
-    const previous = get().activeChoice
-    set({ activeChoice: { id, base: useSettings.getState().settings.activeModeId } })
+    watchSettingsForChoice()
+    const base = useSettings.getState().settings.activeModeId
+    if (id === base) {
+      // Already active: nothing to bridge.
+      set({ activeChoice: null })
+    } else {
+      set({ activeChoice: { id, base } })
+    }
+    const mine = get().activeChoice
     try {
       await invoke('modes:setActive', { id })
     } catch (err) {
-      set({ activeChoice: previous })
+      // Main refused: show the real setting again (unless a newer choice replaced this one).
+      if (mine && get().activeChoice === mine) set({ activeChoice: null })
       throw err
     }
   },
 }))
 
+/** The active Mode id given the settings value and a pending choice (pure; unit-tested). */
+export function resolveActiveModeId(activeModeId: string, choice: ActiveChoice | null): string {
+  return choice && choice.base === activeModeId ? choice.id : activeModeId
+}
+
 /** The active Mode id, including a choice main has not echoed back through settings yet. */
 export function useActiveModeId(): string {
   const activeModeId = useSettings((s) => s.settings.activeModeId)
   const choice = useModes((s) => s.activeChoice)
-  return choice && choice.base === activeModeId ? choice.id : activeModeId
+  return resolveActiveModeId(activeModeId, choice)
 }
 
 function sortModes(modes: Mode[]): Mode[] {
