@@ -165,7 +165,12 @@ export function SessionPage({ sessionId, tab }: { sessionId: string; tab: Sessio
         <div className="mx-auto max-w-[920px] px-10 pt-6">
           <div className="flex items-start gap-4">
             <div className="min-w-0 flex-1">
-              <EditableTitle title={title} onRename={rename} headingRef={headingRef} />
+              <EditableTitle
+                title={detail.title}
+                placeholder={t('home.untitled')}
+                onRename={rename}
+                headingRef={headingRef}
+              />
               <div className="mt-1">
                 <MetaLine detail={detail} />
               </div>

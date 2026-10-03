@@ -293,6 +293,15 @@ async function installFakes(app: ElectronApplication, state: FakeState): Promise
     const send = (event: string, payload: unknown) => {
       for (const w of BrowserWindow.getAllWindows()) w.webContents.send(event, payload)
     }
+    // Main's real NoticeCenter still pushes 'app:notices' when, e.g., startup model validation
+    // or an update check finishes, which depends on network timing. Keep the fake notices
+    // authoritative so such a late push cannot swap them out in the middle of a test.
+    for (const w of BrowserWindow.getAllWindows()) {
+      const wc = w.webContents
+      const realSend = wc.send.bind(wc)
+      wc.send = (channel: string, ...args: unknown[]) =>
+        channel === 'app:notices' ? realSend(channel, g.__fake.notices) : realSend(channel, ...args)
+    }
     const replace = (ch: string, fn: (req: Req) => unknown) => {
       ipcMain.removeHandler(ch)
       ipcMain.handle(ch, async (_e, raw: unknown) => {
@@ -824,6 +833,44 @@ test('session page: a background title change does not discard the title being t
     title: 'Acme pricing kickoff',
   })
   // Not editing: a background change shows up.
+  await changeDetail(ctx.app, 's1', { title: 'Q3 roadmap review: Acme' })
+  await expect(page.getByRole('heading', { name: 'Q3 roadmap review: Acme' })).toBeVisible()
+})
+
+test('session page: an untouched title edit never writes over a title changed in the background', async () => {
+  const renames = (await calls(ctx.app, 'sessions:rename')).length
+  const waitForReload = async (change: () => Promise<void>) => {
+    const loads = (await calls(ctx.app, 'sessions:get')).length
+    await change()
+    await expect
+      .poll(async () => (await calls(ctx.app, 'sessions:get')).length)
+      .toBeGreaterThan(loads)
+    await page.waitForTimeout(150)
+  }
+
+  // Renamed elsewhere (another window) while this editor is open; clicking away keeps it.
+  await page.getByRole('button', { name: 'Q3 roadmap review: Acme' }).click()
+  const input = page.getByTestId('title-input')
+  await expect(input).toHaveValue('Q3 roadmap review: Acme')
+  await waitForReload(() => changeDetail(ctx.app, 's1', { title: 'Acme: Q3 roadmap' }))
+  await input.blur()
+  await expect(page.getByRole('heading', { name: 'Acme: Q3 roadmap' })).toBeVisible()
+
+  // Untitled meeting: the edit starts empty (the placeholder is not a value), notes then name
+  // the meeting, and Enter without typing keeps the generated title.
+  await push(ctx.app, 'navigate', { name: 'session', sessionId: 's7', tab: 'notes' })
+  await page.getByRole('button', { name: 'Untitled meeting', exact: true }).click()
+  await expect(input).toHaveValue('')
+  await expect(input).toHaveAttribute('placeholder', 'Untitled meeting')
+  await waitForReload(() => changeDetail(ctx.app, 's7', { title: 'Pricing discussion with Acme' }))
+  await input.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Pricing discussion with Acme' })).toBeVisible()
+  expect(await calls(ctx.app, 'sessions:rename')).toHaveLength(renames)
+
+  // Restore the fixtures later tests rely on.
+  await changeDetail(ctx.app, 's7', { title: '' })
+  await expect(page.getByRole('heading', { name: 'Untitled meeting' })).toBeVisible()
+  await page.getByRole('button', { name: 'Back' }).click()
   await changeDetail(ctx.app, 's1', { title: 'Q3 roadmap review: Acme' })
   await expect(page.getByRole('heading', { name: 'Q3 roadmap review: Acme' })).toBeVisible()
 })
