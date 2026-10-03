@@ -556,8 +556,10 @@ export class AiService {
           detail: `empty answer (finish_reason: ${finishReason ?? 'none'})`,
         })
       }
-      // Cut off at the token cap: say so, so nobody reads half a sentence out as a full answer.
-      if (finishReason === 'length') text = `${text.trimEnd()}…\n\n_${t('models.answerTruncated')}_`
+      // Cut off at the token cap: end on '…' so nobody reads half a sentence out as a full
+      // answer. Only the ellipsis, no explanatory prose: this text is what gets stored, copied
+      // and sent back to the model as an earlier meeting-chat turn.
+      if (finishReason === 'length') text = `${text.trimEnd()}…`
       card.status = 'done'
       card.text = text
       card.stats = stats

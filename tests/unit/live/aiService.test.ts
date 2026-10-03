@@ -196,9 +196,27 @@ describe('AiService', () => {
     await finished
     const done = h.eventsOf('ai:done')[0] as { id: string; text: string }
     expect(done.id).toBe(id)
-    expect(done.text).toBe(`"Thanks for asking. The plan…\n\n_${t('models.answerTruncated')}_`)
+    // Marked by a trailing ellipsis only: the text is stored and copied as it is, so no
+    // explanatory note is mixed into it.
+    expect(done.text).toBe('"Thanks for asking. The plan…')
     expect(h.ai.getCards('live')[0]).toMatchObject({ status: 'done', text: done.text })
     expect(h.history.aiMessages.get(id)?.responseText).toBe(done.text)
+  })
+
+  it('sends a cut-off meeting-chat answer back as the model wrote it (plus "…")', async () => {
+    const h = setup()
+    const session = h.history.sessions.create({ modeId: null, startedAt: Date.now() })
+    h.history.transcript.upsert(tline(session.id, 0, 'Priya will own the pricing follow-up.'))
+    h.llm.script.push({ text: 'Priya owns it, and she', finishReason: 'length' })
+    h.ai.startMeetingChat(session.id, 'Who owns the pricing follow-up?')
+    await vi.waitFor(() => expect(h.eventsOf('ai:done')).toHaveLength(1))
+    expect(h.ai.getCards('meeting_chat', session.id)[0]?.text).toBe('Priya owns it, and she…')
+    h.ai.startMeetingChat(session.id, 'And when is it due?')
+    await vi.waitFor(() => expect(h.eventsOf('ai:done')).toHaveLength(2))
+    expect(h.llm.requests[1]?.messages[2]).toEqual({
+      role: 'assistant',
+      content: 'Priya owns it, and she…',
+    })
   })
 
   it('fails an empty answer (e.g. a reasoning model that used its budget) instead of "done"', async () => {

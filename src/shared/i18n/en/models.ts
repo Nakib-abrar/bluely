@@ -23,7 +23,6 @@ export const models = {
     'The model returned an empty answer. Try again, or pick another model in Settings › AI Models.',
   answerBudgetUsed:
     'The model used its whole token limit before answering (reasoning models think first). Try again, or pick another model in Settings › AI Models.',
-  answerTruncated: 'Cut off: the answer reached its length limit.',
   latencyNoAnswer:
     'The model returned no answer text within the token limit (reasoning models can use it all up).',
 } as const

@@ -230,6 +230,12 @@ const actionItemSchema = z.preprocess(
 )
 
 const ACTION_LIST_KEYS = ['items', 'actionItems', 'actions', 'tasks', 'todos'] as const
+/**
+ * Keys that make a lone object an action item. Narrower than ACTION_TEXT_KEYS: 'title' and
+ * 'description' also head notes-shaped replies ({"title", "summary", "keyPoints"}), which must
+ * not be read as one item called after the meeting.
+ */
+const ACTION_ITEM_KEYS = ['text', 'task', 'action'] as const
 
 const EMAIL_KEYS = {
   subject: ['subject', 'subjectLine', 'title'],
@@ -279,7 +285,10 @@ export function parseNotes(raw: unknown): MeetingNotes | null {
 /**
  * The list of raw action items in a reply, or null when the reply has no recognizable list.
  * Accepts `{"items": [...]}` (and aliases, also wrapped one level deep), a bare `[...]`, a single
- * item object, or an object whose only array is the list.
+ * item (`{"text"|"task"|"action": ..., "owner", "due"}` with no lists in it), or an object that
+ * holds nothing but one list under another key. Anything else (e.g. notes sent in reply to the
+ * actions request) is unreadable rather than guessed at: a wrong guess would replace the
+ * session's action items and their ticks.
  */
 function actionList(raw: unknown): unknown[] | null {
   if (Array.isArray(raw)) return raw
@@ -291,9 +300,10 @@ function actionList(raw: unknown): unknown[] | null {
     if (typeof list === 'string' && NULLISH_VALUES.has(list.trim().toLowerCase())) return []
     return Array.isArray(list) ? list : [list]
   }
-  if (pick(obj, ACTION_TEXT_KEYS) !== undefined) return [obj]
-  const arrays = Object.values(obj).filter((v): v is unknown[] => Array.isArray(v))
-  return arrays.length === 1 ? (arrays[0] ?? null) : null
+  const values = Object.values(obj)
+  const arrays = values.filter((v): v is unknown[] => Array.isArray(v))
+  if (arrays.length === 0) return pick(obj, ACTION_ITEM_KEYS) !== undefined ? [obj] : null
+  return arrays.length === 1 && values.length === 1 ? (arrays[0] ?? null) : null
 }
 
 /**

@@ -178,11 +178,22 @@ function keepGeneratedEmail(
 
 type PartErrors = Map<PostCallPart, string>
 
-/** Inverse of formatErrors: "notes: msg · email: msg" → per-part messages. */
+const PART_ERROR = /^(notes|actions|email): (.+)$/s
+/**
+ * Splits only where the next "<part>: " entry starts, so a message that itself contains " · "
+ * (e.g. a provider's error detail) stays whole. Same rule as the renderer's parsePostCallError.
+ */
+const PART_ERROR_SEPARATOR = / · (?=(?:notes|actions|email): )/
+
+/**
+ * Inverse of formatErrors: "notes: msg · email: msg" → per-part messages. Text that is not a
+ * per-part entry (a whole-run failure, "nothing was transcribed") is dropped: the run that reads
+ * it replaces it.
+ */
 function parseErrors(stored: string | null): PartErrors {
   const out: PartErrors = new Map()
-  for (const segment of (stored ?? '').split(' · ')) {
-    const match = /^(notes|actions|email): (.+)$/s.exec(segment.trim())
+  for (const entry of (stored ?? '').split(PART_ERROR_SEPARATOR)) {
+    const match = PART_ERROR.exec(entry.trim())
     if (match) out.set(match[1] as PostCallPart, match[2] as string)
   }
   return out

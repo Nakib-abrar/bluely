@@ -15,6 +15,8 @@ const EMAIL = (subject: string) => JSON.stringify({ subject, body: `${subject} b
 /** Answers each post-call part from `replies`, or fails it when `failing` has it. */
 class PostCallLLM extends FakeLLM {
   failing = new Set<Part>()
+  /** Message of the failures (default: the friendly 'credits' text). */
+  failMessage: string | undefined
   replies: Record<Part, string> = { notes: NOTES('First'), actions: ACTIONS, email: EMAIL('Hi') }
   gate: Promise<void> | null = null
 
@@ -22,7 +24,9 @@ class PostCallLLM extends FakeLLM {
     const part = req.tag?.replace('post_', '') as Part
     this.requests.push(req)
     if (this.gate) await this.gate
-    if (this.failing.has(part)) throw new ProviderError('credits', { status: 402 })
+    if (this.failing.has(part)) {
+      throw new ProviderError('credits', { status: 402, message: this.failMessage })
+    }
     yield { type: 'delta', text: this.replies[part] }
     const stats = {
       ttftMs: 1,
@@ -160,6 +164,20 @@ describe('PostCallRunner', () => {
     expect(d.actionItems).toHaveLength(1)
     expect(d.postCallError).toMatch(/^notes: /)
     expect(d.postCallError).not.toContain('actions:')
+  })
+
+  it('keeps a carried-over error whole when its message contains " · "', async () => {
+    const h = setup()
+    h.llm.failing = new Set(['notes', 'actions'])
+    h.llm.failMessage = 'Provider said no · request id abc'
+    await h.run()
+    expect(h.detail().postCallError).toBe(
+      'notes: Provider said no · request id abc · actions: Provider said no · request id abc',
+    )
+    h.llm.failing = new Set()
+    await h.run(['actions'])
+    // Used to be cut to "notes: Provider said no" (split on every " · ").
+    expect(h.detail().postCallError).toBe('notes: Provider said no · request id abc')
   })
 
   it('keeps ticked action items ticked across a regenerate', async () => {

@@ -197,6 +197,20 @@ describe('generatePostCall', () => {
     expect(res.errors).toEqual([{ part: 'actions', message: POST_CALL_MESSAGES.invalidResponse }])
   })
 
+  it('does not read notes sent in reply to the actions request as one action item', async () => {
+    // Used to parse as a single item "Pricing call" that replaced the session's items.
+    const llm = new FakeLLM(
+      () =>
+        '{"title":"Pricing call","summary":"We went over the new tiers.","keyPoints":["Tiers"],"decisions":[]}',
+    )
+    const res = await generatePostCall(
+      { llm, log: recordingLogger() },
+      input({ parts: ['actions'] }),
+    )
+    expect(res.actionItems).toBeNull()
+    expect(res.errors).toEqual([{ part: 'actions', message: POST_CALL_MESSAGES.invalidResponse }])
+  })
+
   it('starts all three calls before any of them resolves', async () => {
     const pending: Deferred<string>[] = []
     const llm = new FakeLLM(() => {
@@ -448,9 +462,27 @@ describe('parsers', () => {
     expect(parseActionItems({ data: [{ text: 'Call Sam' }] })).toEqual([
       { text: 'Call Sam', owner: null, due: null },
     ])
+    expect(parseActionItems({ action: 'Book a demo', due: 'Friday' })).toEqual([
+      { text: 'Book a demo', owner: null, due: 'Friday' },
+    ])
     // Nothing usable: null (an error) instead of [] (which would wipe the session's items).
     expect(parseActionItems({})).toBeNull()
     expect(parseActionItems({ summary: 'We talked.' })).toBeNull()
+    // Notes-shaped replies: 'title'/'description' alone don't make an item, and a list that sits
+    // next to other fields (keyPoints beside a summary) is not the action list.
+    expect(
+      parseActionItems({
+        title: 'Pricing call',
+        summary: 'We went over the new tiers.',
+        keyPoints: ['Tiers'],
+        decisions: [],
+      }),
+    ).toBeNull()
+    expect(
+      parseActionItems({ title: 'Pricing call', summary: 'x', keyPoints: ['Tiers'] }),
+    ).toBeNull()
+    expect(parseActionItems({ title: 'Pricing call', description: 'Tiers' })).toBeNull()
+    expect(parseActionItems({ text: 'Call Sam', subtasks: ['Find number'] })).toBeNull()
     expect(parseActionItems({ items: [{ foo: 'bar' }, 'Call Sam'] })).toHaveLength(1)
     expect(parseActionItems({ items: [{ foo: 'bar' }] })).toBeNull()
     expect(parseActionItems(null)).toBeNull()
