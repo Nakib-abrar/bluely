@@ -51,7 +51,7 @@ export interface RetentionSchedulerOptions {
 
 /**
  * Applies the retention setting at startup, every 12 hours, and right after the user changes
- * Settings › Privacy › Data retention.
+ * Settings › Privacy & Data › Data retention.
  */
 export class RetentionScheduler {
   private readonly timers: NonNullable<RetentionSchedulerOptions['timers']>

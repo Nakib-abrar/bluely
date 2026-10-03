@@ -200,6 +200,13 @@ sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
   value name `io.github.nakib-abrar.bluely` (the AppUserModelId = `appId`) with `--hidden`. The
   portable build registers its launcher (`PORTABLE_EXECUTABLE_FILE`), never the copy it extracts
   to `%TEMP%` and deletes on exit; `canLaunchAtStartup()` is false if that path is unknown.
+  The entry lives outside `%APPDATA%\Bluely` and can drift from the setting (the uninstaller
+  removes it but a reinstall keeps the setting; a reinstall into another folder keeps an entry
+  for the old exe; a portable exe can be moved), so every start of a packaged build calls
+  `syncLaunchAtStartup()` from the core handlers: it rewrites the entry when it does not already
+  start this exe with `--hidden` (a matching entry is left alone, so a Task Manager "Disabled"
+  stays), and deletes it when the setting is off. Unpackaged runs (`pnpm dev`, E2E against
+  `out/`) skip this.
 - **Releases**: `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`:
   typecheck, lint, unit tests, build, then `electron-builder --publish never` and
   `SHA256SUMS.txt` (also printed in the job summary). The publish step uploads with `gh`: a new

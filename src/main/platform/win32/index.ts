@@ -33,6 +33,9 @@ export function canLaunchAtStartup(env: NodeJS.ProcessEnv = process.env): boolea
   return startupExecutable(env) !== null
 }
 
+/** Started minimized to the taskbar; the tray icon is always present. */
+const STARTUP_ARGS = ['--hidden']
+
 export function setLaunchAtStartup(enabled: boolean): void {
   const exe = startupExecutable()
   if (enabled && exe === null) {
@@ -42,12 +45,30 @@ export function setLaunchAtStartup(enabled: boolean): void {
     openAtLogin: enabled,
     // Disabling deletes the value by name, so the path only matters when enabling.
     path: exe ?? process.execPath,
-    // Started minimized to the taskbar; the tray icon is always present.
-    args: enabled ? ['--hidden'] : [],
+    args: enabled ? [...STARTUP_ARGS] : [],
     // Electron's default is the AppUserModelId too, but only once onReady() has set it; naming
     // it explicitly keeps the value in step with the uninstaller (build/installer.nsh).
     name: APP_USER_MODEL_ID,
   })
+}
+
+/**
+ * Makes the Run value match the launchAtStartup setting (see platform.syncLaunchAtStartup).
+ * Rewrites it only when it does not already start this exe with --hidden: Electron's
+ * openAtLogin compares the value named after the AppUserModelId with that command line and
+ * ignores StartupApproved, so an entry the user disabled in Task Manager stays disabled.
+ * When the setting is off, the value is deleted by name, wherever it points.
+ */
+export function syncLaunchAtStartup(wanted: boolean): void {
+  if (!wanted) {
+    setLaunchAtStartup(false)
+    return
+  }
+  const exe = startupExecutable()
+  // A portable build started without its launcher has nothing to register that survives.
+  if (exe === null) return
+  if (app.getLoginItemSettings({ path: exe, args: [...STARTUP_ARGS] }).openAtLogin) return
+  setLaunchAtStartup(true)
 }
 
 /** electron-builder's portable launcher sets this variable for the extracted app. */

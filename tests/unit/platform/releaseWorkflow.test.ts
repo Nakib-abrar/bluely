@@ -1,18 +1,15 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { loadYaml } from './yaml'
 
 /**
  * The release job (.github/workflows/release.yml). Its publish step runs here in bash with a
  * stand-in `gh` that simulates the GitHub Release, the same way the Actions runner runs it
  * (`bash -eo pipefail`, in the step's working-directory, with VERSION in the environment).
  */
-
-// js-yaml ships with electron-builder (app-builder-lib), which parses this kind of file too.
-const yaml = createRequire(import.meta.url)('js-yaml') as { load: (src: string) => unknown }
 
 interface Step {
   name?: string
@@ -24,7 +21,7 @@ interface Step {
 }
 
 const ROOT = join(__dirname, '..', '..', '..')
-const workflow = yaml.load(
+const workflow = loadYaml(
   readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8'),
 ) as { jobs: Record<string, { steps: Step[] }> }
 const steps = Object.values(workflow.jobs).flatMap((job) => job.steps)

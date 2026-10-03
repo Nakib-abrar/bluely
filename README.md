@@ -101,7 +101,8 @@ Bluely runs on **Windows 10 and 11 (x64)**.
      quit).
    - **`Bluely-<version>-portable.exe`**: single file, nothing installed. Portable builds do
      **not** auto-update; download a new release to upgrade. _Launch at startup_ registers this
-     exe where it is, so turn it off before you move or delete the file.
+     exe where it is (start it once from its new folder after moving it), so turn it off before
+     you delete the file.
 2. **Windows SmartScreen.** Bluely's builds are not code-signed yet (a certificate costs money the
    project does not have), so Windows shows _"Windows protected your PC"_ the first time. Click
    **More info → Run anyway**. Only do this for files downloaded from the official Releases page.

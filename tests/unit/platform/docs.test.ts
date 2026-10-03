@@ -1,18 +1,15 @@
 import { readdirSync, readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { onboarding } from '@shared/i18n/en/onboarding'
 import { settings } from '@shared/i18n/en/settings'
+import { loadYaml, yamlVersion } from './yaml'
 
 /**
  * The user-facing docs must describe the app as it is. These checks tie the claims that drifted
  * before (onboarding steps, Settings page names, Delete all, the installer, what PRIVACY.md says
  * is uploaded, the Windows loopback status) to the source they describe.
  */
-
-// js-yaml ships with electron-builder (app-builder-lib), which reads electron-builder.yml with it.
-const yaml = createRequire(import.meta.url)('js-yaml') as { load: (src: string) => unknown }
 
 const ROOT = join(__dirname, '..', '..', '..')
 const read = (...p: string[]) => readFileSync(join(ROOT, ...p), 'utf8')
@@ -83,6 +80,25 @@ describe('Settings page names in the docs', () => {
     }
     expect(bad).toEqual([])
   })
+
+  it('source comments call the privacy page by its name too', () => {
+    const files = readdirSync(join(ROOT, 'src'), { recursive: true, encoding: 'utf8' }).filter(
+      (f) => /\.tsx?$/.test(f),
+    )
+    expect(files.length).toBeGreaterThan(50)
+    const stale: string[] = []
+    for (const file of files) {
+      // Comment markers dropped and whitespace collapsed, so a phrase wrapped over lines matches.
+      const text = read('src', file)
+        .replace(/\n\s*(?:\*(?!\/)|\/\/)?/g, ' ')
+        .replace(/\s+/g, ' ')
+      for (const m of text.matchAll(/(Windows )?Settings › Privacy(?! & Data)/g)) {
+        if (!m[1]) stale.push(file) // Windows' own Settings › Privacy & security is fine
+      }
+    }
+    expect(settings.nav.privacy).toBe('Privacy & Data')
+    expect(stale).toEqual([])
+  })
 })
 
 describe('Delete all data', () => {
@@ -102,7 +118,7 @@ describe('Delete all data', () => {
 })
 
 describe('installer', () => {
-  const builder = yaml.load(read('electron-builder.yml')) as {
+  const builder = loadYaml(read('electron-builder.yml')) as {
     nsis: { oneClick?: boolean; perMachine?: boolean }
   }
 
@@ -167,5 +183,12 @@ describe('Windows loopback status of the pinned Electron', () => {
       )
       expect(read('src', 'main', 'platform', 'win32', 'index.ts')).not.toMatch(/loopback works/i)
     }
+  })
+})
+
+describe('test tooling', () => {
+  it('parses YAML with a declared, pinned devDependency (not one hoisted from electron-builder)', () => {
+    const pkg = JSON.parse(read('package.json')) as { devDependencies: Record<string, string> }
+    expect(pkg.devDependencies['js-yaml']).toBe(yamlVersion)
   })
 })

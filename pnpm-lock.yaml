@@ -87,6 +87,9 @@ importers:
       globals:
         specifier: 17.13.0
         version: 17.13.0
+      js-yaml:
+        specifier: 4.3.2
+        version: 4.3.2
       lucide-react:
         specifier: 1.50.0
         version: 1.50.0(@types/react@19.3.0)(react@19.3.0)
