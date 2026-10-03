@@ -61,6 +61,22 @@ builds):
 | `pnpm dist`            | Windows NSIS installer + portable exe into `release/`                            |
 | `pnpm dist:dir`        | Unpacked Windows app in `release/win-unpacked/` (quick packaging check)          |
 
+### Opt-in end-to-end checks
+
+Some Playwright specs skip unless you switch them on, because they play sound, need a packaged
+build or take a minute to measure:
+
+| Spec                               | Switch                                         | What it checks                                                                                              |
+| ---------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `tests/e2e/audio.spec.ts`          | `BLUELY_HARNESS=1 pnpm build` first            | The capture pipeline (worklet, Silero VAD, WAV) on Chromium's fake mic; PulseAudio loopback on Linux       |
+| `tests/e2e/liveaudio.spec.ts`      | Linux: PulseAudio installed; Windows: `BLUELY_E2E_AUDIO=1` | Speech played on the speakers → "Them" line → automatic suggestion → notes (plays sound out loud on Windows) |
+| `tests/e2e/perf.spec.ts`           | `BLUELY_PERF=1`                                | CPU and memory of every Bluely process, app idle and during a live session                                 |
+| `tests/e2e/packaged.spec.ts`       | `BLUELY_PACKAGED_EXE=release\win-unpacked\Bluely.exe` (after `pnpm dist:dir`) | The packaged app: data folder, native SQLite module, bundled VAD files, a session that starts capture |
+
+`.github/workflows/loopback-windows.yml` runs all four on Windows Server 2022 and 2025 runners
+with a virtual sound card (VB-CABLE), plus the loopback verifier for the pinned Electron and its
+neighbours.
+
 ## Project structure
 
 ```

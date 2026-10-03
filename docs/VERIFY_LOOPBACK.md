@@ -95,6 +95,14 @@ Options: `--verbose` prints every step (the page's logs and the track settings);
   Electron version, but a virtual cable is not a real speaker or headset driver (no vendor
   enhancements, Bluetooth hands-free switching or exclusive-mode apps), and Windows Server is not
   Windows 10/11.
+- **Bluely itself on Windows CI**: the same workflow's `capture-e2e` job builds Bluely and, on
+  both runners, (1) runs the capture pipeline on Chromium's fake microphone, (2) plays a recorded
+  question on the speakers and checks it comes back as a "Them" transcript line that triggers an
+  automatic suggestion (end of speech → first suggested word about 0.96 s with the mock API's
+  0.35 s transcription and 0.25 s first-token delays), then notes after Stop, (3) measures CPU
+  and memory, and (4) packages the app with `pnpm dist:dir` and starts a session in
+  `release\win-unpacked\Bluely.exe` with desktop audio listening. Transcription and answers come
+  from the local mock API in CI, not from OpenRouter.
 - **Linux** results were measured in a container (see below).
 - **Real hardware**: please add results with a pull request or an issue: paste the full output
   plus your Windows version (`winver`) and audio device.
