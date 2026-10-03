@@ -572,6 +572,19 @@ async function changeDetail(
   )
 }
 
+/** changeDetail, then waits until the open meeting page has reloaded the changed detail. */
+async function changeDetailAndReload(
+  app: ElectronApplication,
+  page: Page,
+  id: string,
+  patch: Partial<SessionDetail>,
+): Promise<void> {
+  const loads = (await calls(app, 'sessions:get')).length
+  await changeDetail(app, id, patch)
+  await expect.poll(async () => (await calls(app, 'sessions:get')).length).toBeGreaterThan(loads)
+  await page.waitForTimeout(150)
+}
+
 /** Broadcasts settings:changed with the fake settings' activeTier changed (overlay chip). */
 async function setFakeTier(app: ElectronApplication, tier: 'fast' | 'smart'): Promise<void> {
   await app.evaluate(({ BrowserWindow }, activeTier) => {
@@ -839,20 +852,12 @@ test('session page: a background title change does not discard the title being t
 
 test('session page: an untouched title edit never writes over a title changed in the background', async () => {
   const renames = (await calls(ctx.app, 'sessions:rename')).length
-  const waitForReload = async (change: () => Promise<void>) => {
-    const loads = (await calls(ctx.app, 'sessions:get')).length
-    await change()
-    await expect
-      .poll(async () => (await calls(ctx.app, 'sessions:get')).length)
-      .toBeGreaterThan(loads)
-    await page.waitForTimeout(150)
-  }
 
   // Renamed elsewhere (another window) while this editor is open; clicking away keeps it.
   await page.getByRole('button', { name: 'Q3 roadmap review: Acme' }).click()
   const input = page.getByTestId('title-input')
   await expect(input).toHaveValue('Q3 roadmap review: Acme')
-  await waitForReload(() => changeDetail(ctx.app, 's1', { title: 'Acme: Q3 roadmap' }))
+  await changeDetailAndReload(ctx.app, page, 's1', { title: 'Acme: Q3 roadmap' })
   await input.blur()
   await expect(page.getByRole('heading', { name: 'Acme: Q3 roadmap' })).toBeVisible()
 
@@ -862,7 +867,7 @@ test('session page: an untouched title edit never writes over a title changed in
   await page.getByRole('button', { name: 'Untitled meeting', exact: true }).click()
   await expect(input).toHaveValue('')
   await expect(input).toHaveAttribute('placeholder', 'Untitled meeting')
-  await waitForReload(() => changeDetail(ctx.app, 's7', { title: 'Pricing discussion with Acme' }))
+  await changeDetailAndReload(ctx.app, page, 's7', { title: 'Pricing discussion with Acme' })
   await input.press('Enter')
   await expect(page.getByRole('heading', { name: 'Pricing discussion with Acme' })).toBeVisible()
   expect(await calls(ctx.app, 'sessions:rename')).toHaveLength(renames)
@@ -873,6 +878,22 @@ test('session page: an untouched title edit never writes over a title changed in
   await page.getByRole('button', { name: 'Back' }).click()
   await changeDetail(ctx.app, 's1', { title: 'Q3 roadmap review: Acme' })
   await expect(page.getByRole('heading', { name: 'Q3 roadmap review: Acme' })).toBeVisible()
+})
+
+test('session page: a typed title edit saves what the input shows, even its start value', async () => {
+  // Opened on the stored title, the user types; another window renames the meeting meanwhile;
+  // the user then types back to exactly the start value and presses Enter.
+  await page.getByRole('button', { name: 'Q3 roadmap review: Acme' }).click()
+  const input = page.getByTestId('title-input')
+  await input.fill('Acme kickoff')
+  await changeDetailAndReload(ctx.app, page, 's1', { title: 'Acme: Q3 roadmap' })
+  await input.fill('Q3 roadmap review: Acme')
+  await input.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Q3 roadmap review: Acme' })).toBeVisible()
+  expect((await calls(ctx.app, 'sessions:rename')).at(-1)?.req).toEqual({
+    id: 's1',
+    title: 'Q3 roadmap review: Acme',
+  })
 })
 
 test('session page: action items toggle optimistically and persist', async () => {

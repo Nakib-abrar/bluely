@@ -4,15 +4,18 @@ export const MAX_TITLE_LENGTH = 200
 /**
  * What a finished title edit should store, or null when nothing should be renamed.
  *
- * `initial` is what the input started with and `current` is the stored title now; they differ
- * when the title changed in the background while the editor was open (notes naming an untitled
- * meeting, a rename from another window). An edit the user did not change must never write the
- * value it started with back over that newer title, so only a draft that differs from where the
- * edit started counts. An empty draft never renames.
+ * `current` is the stored title now, which can differ from what the edit started with when the
+ * title changed in the background while the editor was open (notes naming an untitled meeting,
+ * a rename from another window). `touched` says whether the user typed in the input at all.
+ * An edit the user never typed in is a no-op, so the value it started with is never written
+ * back over a newer title. A typed edit stores exactly what the input shows, even when that
+ * equals the start value again, as long as it differs from the stored title. An empty draft
+ * never renames.
  */
-export function titleToCommit(draft: string, initial: string, current: string): string | null {
+export function titleToCommit(draft: string, current: string, touched: boolean): string | null {
+  if (!touched) return null
   const next = normalize(draft)
-  if (!next || next === normalize(initial) || next === normalize(current)) return null
+  if (!next || next === normalize(current)) return null
   return next
 }
 

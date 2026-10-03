@@ -19,20 +19,20 @@ export interface EditableTitleProps {
  * Keep it mounted across title updates: the stored title can change in the background (notes
  * finishing name an untitled meeting) and must not discard what is being typed. While editing,
  * the input only shows the draft; `title` is read again when the edit starts or is committed.
- * The edit starts from the stored title (empty, not the placeholder, for an untitled meeting),
- * and committing an edit the user left unchanged never writes that start value back over a
- * newer stored title.
+ * The edit starts from the stored title (empty, not the placeholder, for an untitled meeting).
+ * Only an edit the user typed in renames, so leaving an untouched edit never writes that start
+ * value back over a newer stored title, while a typed edit saves exactly what the input shows.
  */
 export function EditableTitle({ title, placeholder, onRename, headingRef }: EditableTitleProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(title)
-  const initial = useRef(title)
+  const touched = useRef(false)
   const cancelled = useRef(false)
 
   const commit = () => {
     setEditing(false)
     if (cancelled.current) return
-    const next = titleToCommit(draft, initial.current, title)
+    const next = titleToCommit(draft, title, touched.current)
     if (next) onRename(next)
   }
 
@@ -44,7 +44,10 @@ export function EditableTitle({ title, placeholder, onRename, headingRef }: Edit
         placeholder={placeholder}
         maxLength={MAX_TITLE_LENGTH}
         aria-label={t('session.title.label')}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          touched.current = true
+          setDraft(e.target.value)
+        }}
         onFocus={(e) => e.currentTarget.select()}
         onBlur={commit}
         onKeyDown={(e) => {
@@ -71,7 +74,7 @@ export function EditableTitle({ title, placeholder, onRename, headingRef }: Edit
         title={t('session.title.edit')}
         onClick={() => {
           cancelled.current = false
-          initial.current = title
+          touched.current = false
           setDraft(title)
           setEditing(true)
         }}
