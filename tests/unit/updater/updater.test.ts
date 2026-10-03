@@ -468,4 +468,24 @@ describe('wireUpdater', () => {
     expect(fake.checkForUpdates).not.toHaveBeenCalled()
     portable.dispose()
   })
+
+  it('refuses "Restart to update" while a call is live (installing quits Bluely)', () => {
+    let live = true
+    const updater = wireUpdater(ctx(false), { isPortable: false, isSessionLive: () => live })
+    const install = handlers.get('updater:install') as () => unknown
+    let thrown: unknown
+    try {
+      install()
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBeInstanceOf(AppError)
+    expect((thrown as AppError).code).toBe('session_live')
+    expect(fake.quitAndInstall).not.toHaveBeenCalled()
+    // Not live: falls through to the normal checks (unsupported in an unpackaged build).
+    live = false
+    expect(() => install()).toThrow(AppError)
+    expect(() => install()).not.toThrow(/Stop the call/)
+    updater.dispose()
+  })
 })

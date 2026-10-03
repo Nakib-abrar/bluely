@@ -172,6 +172,48 @@ describe('TranscriptionQueue concurrency and ordering', () => {
     expect(h.results.map((r) => r.job.id)).toEqual([early.id, late.id])
   })
 
+  it('stops holding results behind a request that is stuck for longer than maxOrderHoldMs', async () => {
+    vi.useFakeTimers()
+    const h = harness({ now: () => Date.now(), concurrencyPerChannel: 3 })
+    const [stuck, second, third] = [job('them', 100), job('them', 200), job('them', 300)]
+    for (const j of [stuck, second, third]) h.q.enqueue(j)
+    await flushMicrotasks()
+    h.stt.callFor(second.segment.wav)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    await vi.advanceTimersByTimeAsync(2_499)
+    expect(h.results).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    // The STT timeout (20 s × 3 attempts) no longer freezes the channel.
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id])
+    // Once bypassed, the stuck request holds nothing: later results flow right away.
+    h.stt.callFor(third.segment.wav)!.d.resolve(sttResult('Third sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id, third.id])
+    // It is still delivered whenever it finishes (consumers place lines by startMs).
+    h.stt.callFor(stuck.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([second.id, third.id, stuck.id])
+    expect(h.q.isIdle()).toBe(true)
+  })
+
+  it('honours a custom maxOrderHoldMs and keeps order when the head finishes in time', async () => {
+    vi.useFakeTimers()
+    const h = harness({ now: () => Date.now(), maxOrderHoldMs: 500 })
+    const first = job('me', 100)
+    const second = job('me', 200)
+    h.q.enqueue(first)
+    h.q.enqueue(second)
+    await flushMicrotasks()
+    h.stt.callFor(second.segment.wav)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    await vi.advanceTimersByTimeAsync(400)
+    h.stt.callFor(first.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(h.results.map((r) => r.job.id)).toEqual([first.id, second.id])
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(h.results).toHaveLength(2)
+  })
+
   it('keeps channels independent', async () => {
     const h = harness()
     const me1 = job('me', 1)

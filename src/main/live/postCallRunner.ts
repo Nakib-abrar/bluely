@@ -26,7 +26,11 @@ export class PostCallRunner {
     return this.running.has(sessionId)
   }
 
-  async run(sessionId: string, mode: Mode): Promise<void> {
+  async run(
+    sessionId: string,
+    mode: Mode,
+    _opts?: { parts?: ('notes' | 'actions' | 'email')[] },
+  ): Promise<void> {
     if (this.running.has(sessionId)) return
     this.running.add(sessionId)
     const { sessions, transcript, actionItems, aiMessages } = this.history

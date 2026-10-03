@@ -1,4 +1,5 @@
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
+import { t } from '@shared/i18n'
 import { updater as updaterMessages } from '@shared/i18n/en/updater'
 import { RELEASES_URL } from '@shared/constants'
 import type { UpdateStatus } from '@shared/types'
@@ -327,8 +328,14 @@ export class Updater {
   }
 }
 
-/** Registers the updater IPC handlers and starts background checks (installed builds only). */
-export function wireUpdater(ctx: CoreContext, opts: { isPortable: boolean }): Updater {
+/**
+ * Registers the updater IPC handlers and starts background checks (installed builds only).
+ * `isSessionLive`: "Restart to update" is refused during a call, since installing quits Bluely.
+ */
+export function wireUpdater(
+  ctx: CoreContext,
+  opts: { isPortable: boolean; isSessionLive?: () => boolean },
+): Updater {
   const updater = new Updater({
     events: ctx.events,
     log: ctx.log.child('updater'),
@@ -337,7 +344,10 @@ export function wireUpdater(ctx: CoreContext, opts: { isPortable: boolean }): Up
   })
   handle('updater:check', () => updater.check())
   handle('updater:download', () => updater.download())
-  handle('updater:install', () => updater.install())
+  handle('updater:install', () => {
+    if (opts.isSessionLive?.()) throw new AppError('session_live', t('live.updateBlockedLive'))
+    updater.install()
+  })
   handle('updater:getStatus', () => updater.status())
   updater.startAutoCheck()
   return updater
