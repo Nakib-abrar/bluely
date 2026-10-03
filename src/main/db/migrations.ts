@@ -282,6 +282,27 @@ export const MIGRATIONS: Migration[] = [
       rebuildSearchIndex(db)
     },
   },
+  {
+    version: 3,
+    name: 'store indexed text in NFC',
+    up: (db) => {
+      // Search queries are NFC-normalized and unicode61 compares code points as stored, so
+      // text saved in another form (e.g. Bangla য় as the precomposed U+09DF, which NFC
+      // decomposes) could never be found. Repositories now write NFC; this converts older
+      // rows. The search triggers re-index every row whose text changes, so the indexes stay
+      // in step without a full rebuild.
+      db.function('bluely_nfc', { deterministic: true }, (value: unknown) =>
+        typeof value === 'string' ? value.normalize('NFC') : value,
+      )
+      db.exec(`
+        UPDATE sessions SET title = bluely_nfc(title) WHERE title <> bluely_nfc(title);
+        UPDATE transcript_lines SET text = bluely_nfc(text) WHERE text <> bluely_nfc(text);
+        UPDATE action_items SET text = bluely_nfc(text) WHERE text <> bluely_nfc(text);
+        UPDATE ai_messages SET response_text = bluely_nfc(response_text)
+          WHERE kind IN ('post_notes', 'post_email') AND response_text <> bluely_nfc(response_text);
+      `)
+    },
+  },
 ]
 
 /** Recreates both search indexes from the source tables. */

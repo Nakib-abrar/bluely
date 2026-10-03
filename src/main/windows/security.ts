@@ -74,16 +74,46 @@ export function makeTrustedUrlCheck(env: Env): (url: string) => boolean {
   }
 }
 
-export function isAllowedExternalUrl(url: string): boolean {
-  return EXTERNAL_URL_ALLOWLIST.some((prefix) => url.startsWith(prefix))
+// Percent-encoded '.', '/' and '\' could turn into path traversal on the server side.
+const ENCODED_PATH_SYNTAX_RE = /%(2e|2f|5c)/i
+
+/**
+ * Parses `url` and returns its normalized href when it may be opened with shell.openExternal,
+ * otherwise null. The check runs on the parsed URL, after the WHATWG parser has resolved
+ * dot-segments and backslashes, so "…/bluely/../../evil" or "…/bluely\..\evil" cannot escape
+ * the repository, and "…/bluely-evil" is not mistaken for it. Callers must open the returned
+ * href, not the original string.
+ */
+export function normalizeExternalUrl(url: string): string | null {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'https:' || u.username || u.password) return null
+  const host = u.host.toLowerCase()
+  if ((EXTERNAL_URL_ALLOWLIST.hosts as readonly string[]).includes(host)) return u.href
+  const { repo } = EXTERNAL_URL_ALLOWLIST
+  if (host !== repo.host || ENCODED_PATH_SYNTAX_RE.test(u.pathname)) return null
+  // GitHub owner and repository names are case-insensitive.
+  const path = u.pathname.toLowerCase()
+  const repoPath = repo.path.toLowerCase()
+  return path === repoPath || path.startsWith(`${repoPath}/`) ? u.href : null
 }
 
+export function isAllowedExternalUrl(url: string): boolean {
+  return normalizeExternalUrl(url) !== null
+}
+
+/** Opens an allowlisted https URL in the default browser; returns false when it was blocked. */
 export async function openExternalSafe(url: string, log: Logger): Promise<boolean> {
-  if (!isAllowedExternalUrl(url)) {
+  const href = normalizeExternalUrl(url)
+  if (!href) {
     log.warn('Blocked openExternal for non-allowlisted URL', { url })
     return false
   }
-  await shell.openExternal(url)
+  await shell.openExternal(href)
   return true
 }
 

@@ -3,6 +3,7 @@ import {
   app,
   clipboard,
   dialog,
+  shell,
   type BrowserWindow,
   type SaveDialogOptions,
   type SaveDialogReturnValue,
@@ -22,6 +23,7 @@ import {
 import { ht } from '../data/messages'
 import { recoverUnfinishedSessions } from '../data/recovery'
 import { RetentionScheduler } from '../data/retention'
+import { deleteSessionScreenshots } from '../data/screenshots'
 import { ActionItemsRepo } from '../db/repos/actionItemsRepo'
 import { AiMessagesRepo } from '../db/repos/aiMessagesRepo'
 import { SessionsRepo } from '../db/repos/sessionsRepo'
@@ -29,7 +31,6 @@ import { TranscriptRepo } from '../db/repos/transcriptRepo'
 import { SearchService } from '../db/search'
 import { AppError } from '../errors'
 import { handle } from '../ipc/registry'
-import { openExternalSafe } from '../windows/security'
 
 /** Services the history slice offers to the rest of the app (session manager, AI, notices). */
 export interface HistoryFeature {
@@ -86,7 +87,13 @@ export function wireHistory(ctx: CoreContext): HistoryFeature {
   }
 
   const changed = (id: string | null) => events.broadcast('sessions:changed', { id })
-  const retention = new RetentionScheduler({ db, settings, log, onDeleted: () => changed(null) })
+  const retention = new RetentionScheduler({
+    db,
+    settings,
+    log,
+    screenshotsDir: ctx.paths.screenshotsDir,
+    onDeleted: () => changed(null),
+  })
 
   handle('sessions:list', ({ limit, before }) => sessions.list({ limit, before }))
 
@@ -102,14 +109,18 @@ export function wireHistory(ctx: CoreContext): HistoryFeature {
     if (!s) return // already gone (double click, other window)
     if (s.status === 'active') throw new AppError('session_live', ht('errSessionLive'))
     sessions.delete(id)
+    // Saved screenshots belong to the meeting. `id` named an existing row, so it is a real
+    // session id and not a path chosen by the renderer.
+    deleteSessionScreenshots(ctx.paths.screenshotsDir, [s.id], log)
     changed(id)
   })
 
   handle('sessions:updateEmail', ({ id, subject, body }) => {
     const email = { subject, body }
     // summary_json is what the UI shows; the post_email row is what search indexes.
+    // emailEdited keeps "Regenerate" from overwriting the user's edits.
     db.transaction(() => {
-      sessions.updateSummaryJson(id, { email })
+      sessions.updateSummaryJson(id, { email, emailEdited: true })
       aiMessages.upsertPostCall(id, 'post_email', emailToMarkdown(email))
     })()
     changed(id)
@@ -137,14 +148,17 @@ export function wireHistory(ctx: CoreContext): HistoryFeature {
     if (!sessions.get(id)) throw notFound()
     const email = sessions.getSummaryJson(id).email
     if (!email) throw new AppError('no_email', ht('errNoEmail'))
-    let opened = false
+    // Main builds this URL itself from the stored email (no recipient), so it is opened
+    // directly; mailto: is not on the renderer-reachable openExternal allowlist.
+    const url = mailtoUrl(email)
+    if (!url.startsWith('mailto:')) throw new AppError('mail_failed', ht('errMailBlocked'))
     try {
-      opened = await openExternalSafe(mailtoUrl(email), log)
+      await shell.openExternal(url)
     } catch (err) {
       // No default mail app registered, or the OS refused the URL.
       log.warn('Opening the mail draft failed', err)
+      throw new AppError('mail_failed', ht('errMailBlocked'))
     }
-    if (!opened) throw new AppError('mail_failed', ht('errMailBlocked'))
   })
 
   handle('actionItems:setDone', ({ id, done }) => {
@@ -162,7 +176,7 @@ export function wireHistory(ctx: CoreContext): HistoryFeature {
       filters: [{ name: ht('filterZip'), extensions: ['zip'] }],
     })
     if (res.canceled || !res.filePath) return { path: null }
-    const zip = exportAllZip(db, { version: app.getVersion() })
+    const zip = await exportAllZip(db, { version: app.getVersion() })
     await writeFile(res.filePath, zip)
     log.info(`Exported all data (${zip.byteLength} bytes)`)
     return { path: res.filePath }

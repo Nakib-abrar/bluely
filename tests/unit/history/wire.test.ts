@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { clipboard, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
@@ -10,6 +10,7 @@ import type { Env } from '@main/env'
 import { wireHistory, type HistoryFeature } from '@main/history/wire'
 import { EventBus } from '@main/ipc/events'
 import { _resetRegistryForTests, initIpcRegistry } from '@main/ipc/registry'
+import { RETENTION_STARTUP_DELAY_MS } from '@main/data/retention'
 import { createLogger } from '@main/log'
 import { SecretStore } from '@main/settings/secrets'
 import { SettingsStore } from '@main/settings/settingsStore'
@@ -152,13 +153,25 @@ describe('wireHistory', () => {
     expect(f.aiMessages.get('m1')?.status).toBe('cancelled')
   })
 
-  it('applies retention at startup', () => {
-    ctx.settings.update({ privacy: { retentionDays: 30 } })
-    db.prepare(
-      "INSERT INTO sessions(id, title, started_at, status, created_at) VALUES ('old', 'Old', 1, 'done', 1)",
-    ).run()
-    const f = wire()
-    expect(f.sessions.get('old')).toBeNull()
+  it('applies retention shortly after startup, without blocking it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      ctx.settings.update({ privacy: { retentionDays: 30 } })
+      db.prepare(
+        "INSERT INTO sessions(id, title, started_at, status, created_at) VALUES ('old', 'Old', 1, 'done', 1)",
+      ).run()
+      const shot = join(ctx.paths.screenshotsDir, 'old', 'card.jpg')
+      mkdirSync(join(ctx.paths.screenshotsDir, 'old'), { recursive: true })
+      writeFileSync(shot, 'jpeg')
+      const f = wire()
+      expect(f.sessions.get('old')).not.toBeNull()
+      vi.advanceTimersByTime(RETENTION_STARTUP_DELAY_MS)
+      await f.retention.runNow()
+      expect(f.sessions.get('old')).toBeNull()
+      expect(existsSync(shot)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('lists, gets, renames and deletes sessions with change events', async () => {
@@ -195,6 +208,31 @@ describe('wireHistory', () => {
     expect(changes).toEqual(['a', 'a'])
   })
 
+  it("deletes a meeting's saved screenshots with it, and nothing else", async () => {
+    const f = wire()
+    const shots = ctx.paths.screenshotsDir
+    for (const folder of ['a', 'b', 'live', 'no-session']) {
+      mkdirSync(join(shots, folder), { recursive: true })
+      writeFileSync(join(shots, folder, 'card.jpg'), 'jpeg')
+    }
+    for (const id of ['a', 'b']) {
+      f.sessions.create({ id, modeId: null, startedAt: 1 })
+      f.sessions.setStatus(id, 'done')
+    }
+    f.sessions.create({ id: 'live', modeId: null, startedAt: 2 })
+    await ok('sessions:delete', { id: 'a' })
+    expect(existsSync(join(shots, 'a'))).toBe(false)
+    expect(existsSync(join(shots, 'b', 'card.jpg'))).toBe(true)
+    expect(existsSync(join(shots, 'no-session', 'card.jpg'))).toBe(true)
+    expect(await errorCode('sessions:delete', { id: 'live' })).toBe('session_live')
+    expect(existsSync(join(shots, 'live', 'card.jpg'))).toBe(true)
+    // An id that names no meeting never becomes a path.
+    await ok('sessions:delete', { id: 'no-session' })
+    await ok('sessions:delete', { id: '..' })
+    expect(existsSync(join(shots, 'no-session', 'card.jpg'))).toBe(true)
+    expect(existsSync(join(shots, 'b', 'card.jpg'))).toBe(true)
+  })
+
   it('saves the edited follow-up email to summary_json and the search index', async () => {
     const f = wire()
     f.sessions.create({ id: 's', modeId: null, startedAt: 1 })
@@ -208,6 +246,8 @@ describe('wireHistory', () => {
       subject: 'Pricing recap',
       body: 'Hi Sam,\nthe quote is attached.',
     })
+    // Marks the email as the user's, so "Regenerate" keeps it.
+    expect(f.sessions.getSummaryJson('s').emailEdited).toBe(true)
     await ok('sessions:updateEmail', {
       id: 's',
       subject: 'Pricing recap',
@@ -269,6 +309,8 @@ describe('wireHistory', () => {
     f.sessions.updateSummaryJson('s', { email: { subject: 'Hi there', body: 'Line 1\nLine 2' } })
     await ok('sessions:openMailDraft', { id: 's' })
     expect(open).toHaveBeenCalledWith('mailto:?subject=Hi%20there&body=Line%201%0D%0ALine%202')
+    // Opened by main directly: mailto: is not on the renderer-reachable allowlist.
+    expect(open).toHaveBeenCalledTimes(1)
     open.mockRejectedValueOnce(new Error('no handler'))
     expect(await errorCode('sessions:openMailDraft', { id: 's' })).toBe('mail_failed')
   })
@@ -359,12 +401,13 @@ describe('wireHistory', () => {
     expect(ctx.settings.get().activeModeId).toBe('builtin-sales') // built-in modes survive
   })
 
-  it('broadcasts a refresh when retention deletes sessions later', () => {
+  it('broadcasts a refresh when retention deletes sessions later', async () => {
     const f = wire()
     db.prepare(
       "INSERT INTO sessions(id, title, started_at, status, created_at) VALUES ('old', 'Old', 1, 'done', 1)",
     ).run()
     ctx.settings.update({ privacy: { retentionDays: 365 } })
+    await f.retention.runNow()
     expect(f.sessions.get('old')).toBeNull()
     expect(changes).toEqual([null])
   })

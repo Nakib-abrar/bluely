@@ -3,6 +3,7 @@ import type { ActionItem } from '@shared/types'
 import { ht } from '../../data/messages'
 import { AppError } from '../../errors'
 import { newId, type Db } from '../database'
+import { toNfc } from '../text'
 
 /** Raw `action_items` row. */
 export interface ActionItemRow {
@@ -85,7 +86,7 @@ export class ActionItemsRepo {
       this.stmt.deleteForSession.run(sessionId)
       let sort = 0
       for (const item of items) {
-        const text = item.text.trim()
+        const text = toNfc(item.text).trim()
         if (!text) continue
         const done = item.done ?? previousDone.get(textKey(text)) ?? false
         this.stmt.insert.run({
@@ -122,7 +123,7 @@ export class ActionItemsRepo {
 
   /** Throws AppError('not_found') for unknown ids and 'invalid_payload' for empty text. */
   updateText(id: string, text: string): ActionItem {
-    const clean = text.trim()
+    const clean = toNfc(text).trim()
     if (!clean) throw new AppError('invalid_payload', ht('errEmptyActionItem'))
     if (this.stmt.updateText.run(clean, id).changes === 0) {
       throw new AppError('not_found', ht('errActionItemNotFound'))

@@ -14,8 +14,19 @@ export const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits'
 export const ATTRIBUTION_REFERER = REPO_URL
 export const ATTRIBUTION_TITLE = APP_NAME
 
-/** External URLs the app may open with shell.openExternal (prefix match). */
-export const EXTERNAL_URL_ALLOWLIST = ['https://openrouter.ai/', `${REPO_URL}`, 'mailto:'] as const
+/**
+ * What renderer-reachable shell.openExternal calls may open, checked on the parsed URL (never a
+ * string prefix): https only, any page on `hosts`, and on `repo.host` only `repo.path` and the
+ * pages below it. mailto: is deliberately absent: the follow-up email draft is opened by main
+ * from a URL it built itself.
+ */
+export const EXTERNAL_URL_ALLOWLIST = {
+  hosts: ['openrouter.ai'],
+  repo: { host: 'github.com', path: `/${REPO_OWNER}/${REPO_NAME}` },
+} as const
+
+/** Folder under screenshotsDir for screenshots taken while no session was recording. */
+export const SCREENSHOTS_NO_SESSION_DIR = 'no-session'
 
 export const CONSENT_DISCLOSURE_MESSAGE =
   "Heads up: I'm using an AI note-taker (Bluely) to transcribe this call."

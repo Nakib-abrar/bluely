@@ -1,6 +1,7 @@
 import type { Statement } from 'better-sqlite3'
 import type { Channel, TranscriptLine } from '@shared/types'
 import type { Db } from '../database'
+import { toNfc } from '../text'
 
 /** Raw `transcript_lines` row. */
 export interface TranscriptRow {
@@ -93,7 +94,7 @@ export class TranscriptRepo {
       channel: line.channel,
       startMs: Math.round(line.startMs),
       endMs: Math.round(line.endMs),
-      text: line.text,
+      text: toNfc(line.text),
       isFinal: line.isFinal ? 1 : 0,
     })
   }

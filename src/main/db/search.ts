@@ -21,24 +21,41 @@ const MAX_TOKENS = 8
 /** Letters, digits and combining marks (Bangla vowel signs, virama), plus ZWNJ/ZWJ inside words. */
 const TOKEN_RE = /[\p{L}\p{N}\p{M}\u200c\u200d]+/gu
 const HAS_BASE_CHAR_RE = /[\p{L}\p{N}]/u
+const WORD_CHAR_RE = /[\p{L}\p{N}\p{M}]/u
 const EDGE_JOINERS_RE = /^[\u200c\u200d]+|[\u200c\u200d]+$/g
+const APOSTROPHES = new Set(["'", '\u2019', '\u02bc'])
+/** English contractions and possessives: "acme's", "don't", "we'll", "they're", "I've", "I'd", "I'm". */
+const CLITICS = new Set(['s', 't', 'll', 're', 've', 'd', 'm'])
 
 /**
  * Splits user input into lower-case search tokens (max 8, de-duplicated). Everything that is
  * not a letter, digit or mark is a separator, which is what makes FTS5 syntax inert:
  * quotes, operators, `*`, `^`, `col:` and parentheses never reach the MATCH expression.
+ *
+ * Every token must match, so pieces that carry no meaning are dropped: an English clitic after
+ * an apostrophe ("acme's" → acme), and one-character tokens when a longer one exists
+ * ("e-mail" → mail). A one-character prefix also matches nearly every row and has no prefix
+ * index, which made such queries freeze the main process for seconds on a large history.
  */
 export function tokenize(input: string): string[] {
-  const out: string[] = []
+  const text = input.normalize('NFC').toLowerCase()
+  const all: string[] = []
   const seen = new Set<string>()
-  for (const m of input.normalize('NFC').toLowerCase().matchAll(TOKEN_RE)) {
+  for (const m of text.matchAll(TOKEN_RE)) {
     const tok = m[0].replace(EDGE_JOINERS_RE, '')
     if (!tok || !HAS_BASE_CHAR_RE.test(tok) || seen.has(tok)) continue
+    if (CLITICS.has(tok) && isAfterApostropheInWord(text, m.index)) continue
     seen.add(tok)
-    out.push(tok)
-    if (out.length >= MAX_TOKENS) break
+    all.push(tok)
   }
-  return out
+  const long = all.filter((t) => codePoints(t).length > 1)
+  return (long.length ? long : all).slice(0, MAX_TOKENS)
+}
+
+function isAfterApostropheInWord(text: string, index: number): boolean {
+  return (
+    index >= 2 && APOSTROPHES.has(text[index - 1] ?? '') && WORD_CHAR_RE.test(text[index - 2] ?? '')
+  )
 }
 
 function quote(token: string): string {
@@ -48,6 +65,19 @@ function quote(token: string): string {
 /** Prefix match for every token: `"tok1"* AND "tok2"*` (or OR-joined). */
 export function buildFtsQuery(tokens: string[], op: 'AND' | 'OR' = 'AND'): string {
   return tokens.map((t) => `${quote(t)}*`).join(` ${op} `)
+}
+
+/**
+ * True when the query is only one-character tokens, e.g. "Q&A" or "a b": these are searched as
+ * one adjacent phrase ("Q&A" is indexed as the tokens q, a) instead of as unrelated prefixes.
+ */
+export function isLetterRun(tokens: string[]): boolean {
+  return tokens.length > 1 && tokens.every((t) => codePoints(t).length === 1)
+}
+
+/** `"q" + "a"*`: the tokens next to each other, the last one as a prefix. */
+export function buildPhraseQuery(tokens: string[]): string {
+  return `${tokens.map(quote).join(' + ')}*`
 }
 
 function codePoints(s: string): string[] {
@@ -264,24 +294,20 @@ interface FuzzyMatch {
   words: Word[]
 }
 
+type TokenMatch = { idx: number; share: number } | null
+
 /**
- * Typo-tolerant check done in JS on the hit text: every token with ≥ 3 characters must share
- * ≥ 40 % of its trigrams with a single word of the text (comparing per word keeps long notes
- * from matching on scattered trigrams), and shorter tokens must prefix some word.
+ * Matches each token on its own against the words of `text`: a token with ≥ 3 characters must
+ * share ≥ 40 % of its trigrams with a single word (comparing per word keeps long notes from
+ * matching on scattered trigrams), a shorter one must prefix some word. Returns, per token, the
+ * matched word and its trigram share (1 for prefix-only tokens), or null.
  */
-export function fuzzyMatch(text: string, tokens: string[]): FuzzyMatch | null {
-  const words = wordsOf(text)
-  if (!words.length) return null
-  const marked = new Set<number>()
-  let shareSum = 0
-  let fuzzyCount = 0
-  for (const token of tokens) {
+function matchTokens(words: Word[], tokens: string[]): TokenMatch[] {
+  return tokens.map((token): TokenMatch => {
     const tris = trigramsOf(token)
     if (!tris.length) {
       const idx = words.findIndex((w) => w.lower.startsWith(token))
-      if (idx < 0) return null
-      marked.add(idx)
-      continue
+      return idx < 0 ? null : { idx, share: 1 }
     }
     let best = 0
     let bestIdx = -1
@@ -295,12 +321,67 @@ export function fuzzyMatch(text: string, tokens: string[]): FuzzyMatch | null {
         bestIdx = i
       }
     })
-    if (best < FUZZY_MIN_TRIGRAM_SHARE) return null
-    marked.add(bestIdx)
-    shareSum += best
-    fuzzyCount++
+    return best < FUZZY_MIN_TRIGRAM_SHARE ? null : { idx: bestIdx, share: best }
+  })
+}
+
+/** Mean trigram share of the matched tokens that have trigrams (1 when none). */
+function meanFuzzyShare(tokens: string[], matches: TokenMatch[]): number {
+  let sum = 0
+  let n = 0
+  tokens.forEach((t, i) => {
+    const m = matches[i]
+    if (!m || codePoints(t).length < 3) return
+    sum += m.share
+    n++
+  })
+  return n ? sum / n : 1
+}
+
+/** Typo-tolerant check done in JS on the hit text: every token must match (see matchTokens). */
+export function fuzzyMatch(text: string, tokens: string[]): FuzzyMatch | null {
+  const words = wordsOf(text)
+  if (!words.length) return null
+  const matches = matchTokens(words, tokens)
+  const marked = new Set<number>()
+  for (const m of matches) {
+    if (!m) return null
+    marked.add(m.idx)
   }
-  return { share: fuzzyCount ? shareSum / fuzzyCount : 1, marked, words }
+  return { share: meanFuzzyShare(tokens, matches), marked, words }
+}
+
+// unicode61 with remove_diacritics folds case and Latin diacritics (café → cafe); combining
+// marks of other scripts (Bangla vowel signs) stay part of the token.
+const LATIN_DIACRITICS_RE = /[̀-ͯ]/g
+const JOINERS_RE = /[‌‍]/
+
+/** Approximates the FTS tokenizer's folding so highlights land on the words FTS matched. */
+export function foldForMatch(word: string): string {
+  return word.normalize('NFD').replace(LATIN_DIACRITICS_RE, '').normalize('NFC').toLowerCase()
+}
+
+function stripMarks(text: string): string {
+  return text.replaceAll(SNIPPET_MARK_START, '').replaceAll(SNIPPET_MARK_END, '')
+}
+
+/**
+ * Highlighted snippet for an exact (FTS) hit, built from the stored text: words that start with
+ * a query token are marked. Built in JS because FTS5 snippet() re-runs the MATCH for every hit,
+ * which took seconds for short prefixes on a large history.
+ */
+export function prefixSnippet(rawText: string, tokens: string[]): string {
+  const text = stripMarks(rawText)
+  const folded = tokens.map(foldForMatch)
+  const words = wordsOf(text)
+  const marked = new Set<number>()
+  words.forEach((w, i) => {
+    const word = foldForMatch(text.slice(w.start, w.end))
+    // FTS splits words at ZWNJ/ZWJ, so a token may also start inside a joined word.
+    const parts = [word, ...word.split(JOINERS_RE).slice(1)]
+    if (folded.some((t) => parts.some((p) => p.startsWith(t)))) marked.add(i)
+  })
+  return buildSnippet(text, words, marked)
 }
 
 const SNIPPET_WORDS = 12
@@ -308,7 +389,7 @@ const SNIPPET_WORDS = 12
 /** Builds a highlighted snippet like FTS5 snippet(): ~12 words around the first match. */
 export function buildSnippet(text: string, words: Word[], marked: Set<number>): string {
   if (!words.length) return text.slice(0, 200)
-  const first = Math.min(...marked)
+  const first = marked.size ? Math.min(...marked) : 0
   const start = Math.max(0, Math.min(first - 2, words.length - SNIPPET_WORDS))
   const end = Math.min(words.length, start + SNIPPET_WORDS)
   let out = start > 0 ? '…' : ''
@@ -392,17 +473,37 @@ interface TrigramRow extends FtsRow {
   text: string
 }
 
+interface SessionRowHit {
+  rid: number
+  session_id: string
+  kind: SearchHitKind
+  ref_id: string | null
+}
+
+/**
+ * How a session matched, best first: all words in one row (FTS AND); all words somewhere in the
+ * meeting, across rows; then the same two for typo (trigram) matches.
+ */
+const TIER_ROW = 0
+const TIER_SESSION = 1
+const TIER_FUZZY_ROW = 2
+const TIER_FUZZY_SESSION = 3
+
 interface Candidate {
   rid: number
   sessionId: string
   kind: SearchHitKind
   refId: string | null
-  /** Higher is better within its pass. */
+  /** Higher is better within its tier. */
   score: number
-  /** Present for fuzzy hits (snippet built in JS). */
+  /** Present for fuzzy hits (built from the trigram row); exact snippets are built at the end. */
   snippet?: string
   fuzzy: boolean
+  tier: number
 }
+
+/** Best exact row per session for one token (lazily computed, cached for one query). */
+type SessionsWithToken = (tokenIndex: number) => Map<string, Candidate>
 
 interface SessionLookupRow {
   id: string
@@ -422,8 +523,16 @@ const FUZZY_BELOW_SESSIONS = 3
 const FUZZY_MIN_TOKEN_CHARS = 4
 
 // Titles are the strongest signal, then the structured post-call outputs.
-const KIND_WEIGHT_SQL = `(CASE kind WHEN 'title' THEN 2.0 WHEN 'notes' THEN 1.3
-  WHEN 'action_item' THEN 1.2 ELSE 1.0 END)`
+const KIND_WEIGHT: Record<SearchHitKind, number> = {
+  title: 2.0,
+  notes: 1.3,
+  action_item: 1.2,
+  email: 1.0,
+  transcript: 1.0,
+}
+const KIND_WEIGHT_SQL = `(CASE kind ${Object.entries(KIND_WEIGHT)
+  .map(([kind, w]) => `WHEN '${kind}' THEN ${w.toFixed(1)}`)
+  .join(' ')} ELSE 1.0 END)`
 
 /**
  * Full-text search over titles, transcripts, notes, action items and follow-up emails, with a
@@ -433,7 +542,8 @@ const KIND_WEIGHT_SQL = `(CASE kind WHEN 'title' THEN 2.0 WHEN 'notes' THEN 1.3
 export class SearchService {
   private readonly stmt: {
     fts: Statement
-    snippets: Statement
+    count: Statement
+    bestRowPerSession: Statement
     trigram: Statement
     sessionsByIds: Statement
     sessionForExcerpt: Statement
@@ -451,10 +561,13 @@ export class SearchService {
         `SELECT rowid AS rid, session_id, kind, ref_id, bm25(search_fts) * ${KIND_WEIGHT_SQL} AS score
          FROM search_fts WHERE search_fts MATCH ? ORDER BY score LIMIT ?`,
       ),
-      snippets: db.prepare(
-        `SELECT rowid AS rid, snippet(search_fts, 0, @markStart, @markEnd, '…', 12) AS snip
-         FROM search_fts
-         WHERE search_fts MATCH @match AND rowid IN (SELECT value FROM json_each(@ids))`,
+      // Index-only (no row reads), so cheap even for very common words.
+      count: db.prepare('SELECT count(*) AS c FROM search_fts WHERE search_fts MATCH ?'),
+      // One row per session: max() makes SQLite return the bare columns of the row with the
+      // highest kind weight (title, then notes, …). bm25() is not allowed in an aggregate.
+      bestRowPerSession: db.prepare(
+        `SELECT session_id, rowid AS rid, kind, ref_id, max(${KIND_WEIGHT_SQL}) AS weight
+         FROM search_fts WHERE search_fts MATCH ? GROUP BY session_id`,
       ),
       trigram: db.prepare(
         `SELECT rowid AS rid, session_id, kind, ref_id, text,
@@ -483,9 +596,12 @@ export class SearchService {
   }
 
   /**
-   * Searches everything. Groups hits by session (≤ 3 each); sessions are ordered by their best
-   * hit, then by recency. `limit` caps the number of sessions. When the exact pass finds fewer
-   * than 3 sessions, a trigram pass adds close matches and sets `fuzzy`.
+   * Searches everything. A meeting matches when every word occurs in it: first meetings with
+   * all words in one item (a line, the title, the notes…), then meetings where the words are
+   * spread over several items. Groups hits by session (≤ 3 each); within each of those tiers
+   * sessions are ordered by their best hit, then by recency. `limit` caps the number of
+   * sessions. When the exact passes find fewer than 3 sessions, a trigram pass adds close
+   * matches and sets `fuzzy`.
    */
   query(q: string, limit = 50): SearchResult {
     const empty: SearchResult = {
@@ -498,26 +614,42 @@ export class SearchService {
     if (!tokens.length) return empty
     const maxGroups = Math.max(1, Math.min(200, Math.floor(limit) || 50))
     try {
-      const match = buildFtsQuery(tokens)
-      const exact = this.ftsCandidates(match, FTS_CANDIDATES)
-      let groups = this.group(exact, maxGroups)
-      let fuzzy = false
-      // Typo tolerance: only when exact matching found few sessions (regardless of `limit`)
-      // and a token is long enough to carry a typo.
-      const exactSessions = new Set(exact.map((c) => c.sessionId)).size
-      if (
-        exactSessions < FUZZY_BELOW_SESSIONS &&
-        tokens.some((t) => codePoints(t).length >= FUZZY_MIN_TOKEN_CHARS)
-      ) {
-        const seen = new Set(exact.map((c) => c.rid))
-        const close = this.fuzzyCandidates(tokens).filter((c) => !seen.has(c.rid))
-        if (close.length) {
-          const merged = this.group([...exact, ...close], maxGroups)
-          fuzzy = merged.some((g) => g.hits.some((h) => h.fuzzy))
-          groups = merged
+      const phrase = isLetterRun(tokens)
+      const candidates = this.ftsCandidates(
+        phrase ? buildPhraseQuery(tokens) : buildFtsQuery(tokens),
+        FTS_CANDIDATES,
+      )
+      const found = new Set(candidates.map((c) => c.sessionId))
+      const cache = new Map<number, Map<string, Candidate>>()
+      const sessionsWith: SessionsWithToken = (i) => {
+        let rows = cache.get(i)
+        if (!rows) {
+          rows = this.bestRowPerSession(tokens[i] ?? '')
+          cache.set(i, rows)
+        }
+        return rows
+      }
+      // Session-level matches rank after every single-row match, so they are only needed
+      // while those leave room in the result.
+      if (!phrase && tokens.length > 1 && found.size < maxGroups) {
+        for (const c of this.spreadCandidates(tokens, found, sessionsWith)) {
+          candidates.push(c)
+          found.add(c.sessionId)
         }
       }
-      return { ...empty, fuzzy, groups: this.finalizeGroups(groups, match) }
+      // Typo tolerance: only when exact matching found few sessions (regardless of `limit`)
+      // and a token is long enough to carry a typo.
+      if (
+        found.size < FUZZY_BELOW_SESSIONS &&
+        tokens.some((t) => codePoints(t).length >= FUZZY_MIN_TOKEN_CHARS)
+      ) {
+        const seen = new Set(candidates.map((c) => c.rid))
+        const close = this.fuzzyCandidates(tokens, phrase ? undefined : { found, sessionsWith })
+        candidates.push(...close.filter((c) => !seen.has(c.rid)))
+      }
+      const groups = this.group(candidates, maxGroups)
+      const fuzzy = groups.some((g) => g.hits.some((h) => h.fuzzy))
+      return { ...empty, fuzzy, groups: this.finalizeGroups(groups, tokens) }
     } catch (err) {
       this.log?.warn('Search failed', err)
       return empty
@@ -572,10 +704,73 @@ export class SearchService {
       refId: r.ref_id,
       score: -r.score,
       fuzzy: false,
+      tier: TIER_ROW,
     }))
   }
 
-  private fuzzyCandidates(tokens: string[]): Candidate[] {
+  /** For one token: every session that contains it, with its best row (by kind weight). */
+  private bestRowPerSession(token: string): Map<string, Candidate> {
+    const rows = this.stmt.bestRowPerSession.all(buildFtsQuery([token])) as SessionRowHit[]
+    return new Map(
+      rows.map((r) => [
+        r.session_id,
+        {
+          rid: r.rid,
+          sessionId: r.session_id,
+          kind: r.kind,
+          refId: r.ref_id,
+          score: KIND_WEIGHT[r.kind] ?? 1,
+          fuzzy: false,
+          tier: TIER_SESSION,
+        },
+      ]),
+    )
+  }
+
+  /**
+   * Sessions that contain every token somewhere (title, any line, notes, action items, email)
+   * but were not found by the single-row pass, e.g. "acme" in the title and "pricing" said in
+   * a line. Hits are each token's best row in the session. Tokens are scanned rarest first
+   * (counting is index-only) and the scan stops as soon as no new session can come out of it.
+   */
+  private spreadCandidates(
+    tokens: string[],
+    found: ReadonlySet<string>,
+    sessionsWith: SessionsWithToken,
+  ): Candidate[] {
+    const order = tokens
+      .map((t, i) => ({ i, n: (this.stmt.count.get(buildFtsQuery([t])) as { c: number }).c }))
+      .sort((a, b) => a.n - b.n)
+    let common: string[] | null = null
+    for (const { i, n } of order) {
+      if (n === 0) return []
+      const rows = sessionsWith(i)
+      common = common ? common.filter((s) => rows.has(s)) : [...rows.keys()]
+      if (!common.some((s) => !found.has(s))) return []
+    }
+    const out: Candidate[] = []
+    for (const sessionId of common ?? []) {
+      if (found.has(sessionId)) continue
+      const hits = new Map<number, Candidate>()
+      tokens.forEach((_, i) => {
+        const c = sessionsWith(i).get(sessionId)
+        if (c && !hits.has(c.rid)) hits.set(c.rid, c)
+      })
+      out.push(...[...hits.values()].sort((a, b) => b.score - a.score))
+    }
+    return out
+  }
+
+  /**
+   * Typo-tolerant candidates from the trigram index, best first: rows in which every token
+   * matches. With `spread`, also sessions whose rows match the tokens between them, where a
+   * token may also be covered by an exact match elsewhere in the session (e.g. "entreprise"
+   * in one line and "sso" in another).
+   */
+  private fuzzyCandidates(
+    tokens: string[],
+    spread?: { found: ReadonlySet<string>; sessionsWith: SessionsWithToken },
+  ): Candidate[] {
     const fuzzyTokens = tokens.filter((t) => codePoints(t).length >= 3)
     if (!fuzzyTokens.length) return []
     const rows = this.stmt.trigram.all(
@@ -583,29 +778,57 @@ export class SearchService {
       TRIGRAM_CANDIDATES,
     ) as TrigramRow[]
     const out: Candidate[] = []
+    const partial = new Map<string, { cand: Candidate; matched: number[] }[]>()
     for (const r of rows) {
-      const text = r.text.replaceAll(SNIPPET_MARK_START, '').replaceAll(SNIPPET_MARK_END, '')
-      const m = fuzzyMatch(text, tokens)
-      if (!m) continue
-      out.push({
+      const text = stripMarks(r.text)
+      const words = wordsOf(text)
+      if (!words.length) continue
+      const matches = matchTokens(words, tokens)
+      const matched = tokens.map((_, i) => i).filter((i) => matches[i])
+      if (!matched.length) continue
+      const all = matched.length === tokens.length
+      if (!all && (!spread || spread.found.has(r.session_id))) continue
+      const cand: Candidate = {
         rid: r.rid,
         sessionId: r.session_id,
         kind: r.kind,
         refId: r.ref_id,
         // Trigram share (0.4..1) dominates; bm25 (negative, lower is better) only breaks ties.
-        score: m.share - r.score / 1000,
-        snippet: buildSnippet(text, m.words, m.marked),
+        score: meanFuzzyShare(tokens, matches) - r.score / 1000,
+        snippet: buildSnippet(text, words, new Set(matched.map((i) => matches[i]?.idx ?? -1))),
         fuzzy: true,
-      })
+        tier: all ? TIER_FUZZY_ROW : TIER_FUZZY_SESSION,
+      }
+      if (all) out.push(cand)
+      else partial.set(r.session_id, [...(partial.get(r.session_id) ?? []), { cand, matched }])
     }
     out.sort((a, b) => b.score - a.score)
+    if (!spread) return out
+
+    const rowLevel = new Set(out.map((c) => c.sessionId))
+    for (const [sessionId, list] of partial) {
+      if (rowLevel.has(sessionId)) continue
+      const covered = new Set(list.flatMap((p) => p.matched))
+      const exact: Candidate[] = []
+      for (let i = 0; i < tokens.length && covered.size < tokens.length; i++) {
+        if (covered.has(i)) continue
+        const c = spread.sessionsWith(i).get(sessionId)
+        if (!c) break
+        covered.add(i)
+        exact.push(c)
+      }
+      if (covered.size < tokens.length) continue
+      const fuzzyHits = list.map((p) => p.cand).sort((a, b) => b.score - a.score)
+      const rids = new Set(fuzzyHits.map((c) => c.rid))
+      out.push(...fuzzyHits, ...exact.filter((c) => !rids.has(c.rid)))
+    }
     return out
   }
 
   /**
-   * Groups candidates by session. Candidates arrive best-first per pass (exact before fuzzy),
-   * so a session's first candidate is its best hit. Sessions with an exact hit come first,
-   * ordered by best score; ties fall back to recency.
+   * Groups candidates by session. Candidates arrive best-first per tier, so a session's first
+   * candidate is its best hit. Sessions are ordered by the tier of that hit, then by its
+   * score; ties fall back to recency.
    */
   private group(candidates: Candidate[], maxGroups: number): CandidateGroup[] {
     const bySession = new Map<string, CandidateGroup>()
@@ -626,25 +849,14 @@ export class SearchService {
       if (session) groups.push({ ...g, session })
     }
     groups.sort((a, b) => {
-      if (a.best.fuzzy !== b.best.fuzzy) return a.best.fuzzy ? 1 : -1
+      if (a.best.tier !== b.best.tier) return a.best.tier - b.best.tier
       if (a.best.score !== b.best.score) return b.best.score - a.best.score
       return (b.session?.startedAt ?? 0) - (a.session?.startedAt ?? 0)
     })
     return groups.slice(0, maxGroups)
   }
 
-  private finalizeGroups(groups: CandidateGroup[], match: string): SearchGroup[] {
-    const exactIds = groups.flatMap((g) => g.hits.filter((h) => !h.fuzzy).map((h) => h.rid))
-    const snippets = new Map<number, string>()
-    if (exactIds.length) {
-      const rows = this.stmt.snippets.all({
-        markStart: SNIPPET_MARK_START,
-        markEnd: SNIPPET_MARK_END,
-        match,
-        ids: JSON.stringify(exactIds),
-      }) as { rid: number; snip: string }[]
-      for (const r of rows) snippets.set(r.rid, r.snip)
-    }
+  private finalizeGroups(groups: CandidateGroup[], tokens: string[]): SearchGroup[] {
     const out: SearchGroup[] = []
     for (const g of groups) {
       if (!g.session) continue
@@ -654,12 +866,18 @@ export class SearchService {
           sessionId: h.sessionId,
           kind: h.kind,
           refId: h.refId,
-          snippet: (h.fuzzy ? h.snippet : snippets.get(h.rid)) ?? '',
+          snippet: (h.fuzzy ? h.snippet : this.exactSnippet(h.rid, tokens)) ?? '',
           score: h.score,
         })),
       })
     }
     return out
+  }
+
+  /** See {@link prefixSnippet}; the text comes from the index row (one rowid lookup). */
+  private exactSnippet(rid: number, tokens: string[]): string {
+    const row = this.stmt.indexedText.get(rid) as { text: string } | undefined
+    return row ? prefixSnippet(row.text, tokens) : ''
   }
 
   private loadSessions(ids: string[]): Map<string, SessionSummary> {

@@ -1,4 +1,4 @@
-import { strToU8, zipSync, type Zippable } from 'fflate'
+import { strToU8, Zip, ZipDeflate } from 'fflate'
 import { APP_NAME } from '@shared/constants'
 import { t } from '@shared/i18n'
 import type {
@@ -13,6 +13,7 @@ import type { Db } from '../db/database'
 import { AiMessagesRepo, type AiMessageRecord } from '../db/repos/aiMessagesRepo'
 import { SessionsRepo } from '../db/repos/sessionsRepo'
 import { ht } from './messages'
+import { yieldToEventLoop } from './yieldToEventLoop'
 
 // ───────────────────────────── formatting helpers ─────────────────────────────
 
@@ -341,6 +342,62 @@ export interface ExportAllOptions {
   nowMs?: number
   /** Time zone for dates in file names and Markdown (default: system). */
   timeZone?: string
+  /** Awaited between units of work (default: {@link yieldToEventLoop}). */
+  yieldFn?: () => Promise<void>
+}
+
+/** Bytes compressed between two yields (a few milliseconds of deflate). */
+const ZIP_CHUNK_BYTES = 256 * 1024
+
+/** Streams files into a ZIP, compressing in small chunks with `pause()` in between. */
+class ChunkedZip {
+  private readonly chunks: Uint8Array[] = []
+  private readonly zip: Zip
+  private error: Error | null = null
+
+  constructor(
+    private readonly mtime: Date,
+    private readonly pause: () => Promise<void>,
+  ) {
+    // ZipDeflate is synchronous, so data arrives here during push() and end().
+    this.zip = new Zip((err, data) => {
+      if (err) this.error = err
+      else this.chunks.push(data)
+    })
+  }
+
+  async add(name: string, data: Uint8Array): Promise<void> {
+    const file = new ZipDeflate(name, { level: 6 })
+    file.mtime = this.mtime
+    this.zip.add(file)
+    let offset = 0
+    do {
+      const end = Math.min(data.length, offset + ZIP_CHUNK_BYTES)
+      file.push(data.subarray(offset, end), end >= data.length)
+      offset = end
+      if (offset < data.length) await this.pause()
+    } while (offset < data.length)
+    if (this.error) throw this.error
+  }
+
+  finish(): Uint8Array {
+    this.zip.end()
+    if (this.error) throw this.error
+    const out = new Uint8Array(this.chunks.reduce((n, c) => n + c.length, 0))
+    let offset = 0
+    for (const c of this.chunks) {
+      out.set(c, offset)
+      offset += c.length
+    }
+    return out
+  }
+}
+
+/** `JSON.stringify(value, null, 2)` re-indented to sit `depth` levels deep. */
+function indentedJson(value: unknown, depth: number): string {
+  const pad = '  '.repeat(depth)
+  // Line breaks inside strings are escaped by JSON.stringify, so every raw \n is structural.
+  return pad + JSON.stringify(value, null, 2).replace(/\n/g, `\n${pad}`)
 }
 
 /**
@@ -348,30 +405,40 @@ export interface ExportAllOptions {
  * action items, transcript and AI messages minus prompts; modes; knowledge file metadata;
  * settings) and one Markdown file per session under `sessions/`. The API key lives outside
  * the database and is never included; key-like strings in settings are redacted anyway.
+ *
+ * Built one session at a time and compressed in small chunks, yielding to the event loop in
+ * between: a year of meetings is seconds of work, and the main process must keep serving the
+ * windows (and a live call) meanwhile.
  */
-export function exportAllZip(db: Db, opts: ExportAllOptions = {}): Uint8Array {
+export async function exportAllZip(db: Db, opts: ExportAllOptions = {}): Promise<Uint8Array> {
   const nowMs = opts.nowMs ?? Date.now()
+  const pause = opts.yieldFn ?? yieldToEventLoop
   const sessionsRepo = new SessionsRepo(db)
   const aiRepo = new AiMessagesRepo(db)
+  const zip = new ChunkedZip(new Date(nowMs), pause)
 
   const ids = (
     db.prepare('SELECT id FROM sessions ORDER BY started_at, rowid').all() as { id: string }[]
   ).map((r) => r.id)
 
-  const files: Zippable = {}
   const usedNames = new Set<string>()
-  const sessions: unknown[] = []
+  const sessionsJson: string[] = []
   for (const id of ids) {
+    await pause()
     const detail = sessionsRepo.getDetail(id)
     if (!detail) continue
-    sessions.push({ ...detail, aiMessages: aiRepo.listBySession(id).map(withoutPrompt) })
+    // Array items of the top-level "sessions" key sit two levels deep.
+    sessionsJson.push(
+      indentedJson({ ...detail, aiMessages: aiRepo.listBySession(id).map(withoutPrompt) }, 2),
+    )
 
     const base = `sessions/${isoDayMinute(detail.startedAt, opts.timeZone)}-${slugify(detail.title || ht('untitled'))}`
     let name = `${base}.md`
     for (let n = 2; usedNames.has(name); n++) name = `${base}-${n}.md`
     usedNames.add(name)
-    files[name] = strToU8(sessionToMarkdown(detail, { timeZone: opts.timeZone }))
+    await zip.add(name, strToU8(sessionToMarkdown(detail, { timeZone: opts.timeZone })))
   }
+  await pause()
 
   const unattached = (
     db
@@ -425,16 +492,24 @@ export function exportAllZip(db: Db, opts: ExportAllOptions = {}): Uint8Array {
     }
   }
 
-  const payload = {
+  // Same text as JSON.stringify(payload, null, 2), with the sessions serialized one by one above.
+  const members = (value: object) => JSON.stringify(value, null, 2).slice(2, -2)
+  const head = members({
     exportedAt: new Date(nowMs).toISOString(),
     app: APP_NAME,
     version: opts.version ?? 'unknown',
-    sessions,
+  })
+  const tail = members({
     unattachedAiMessages: unattached,
     modes,
     knowledgeFiles,
     settings: scrubSecrets(settings),
-  }
-  files['bluely-export.json'] = strToU8(JSON.stringify(payload, null, 2))
-  return zipSync(files, { level: 6, mtime: new Date(nowMs) })
+  })
+  const sessions = sessionsJson.length ? `[\n${sessionsJson.join(',\n')}\n  ]` : '[]'
+  await pause()
+  await zip.add(
+    'bluely-export.json',
+    strToU8(`{\n${head},\n  "sessions": ${sessions},\n${tail}\n}`),
+  )
+  return zip.finish()
 }

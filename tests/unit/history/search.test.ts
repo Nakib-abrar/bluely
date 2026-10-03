@@ -12,7 +12,7 @@ import {
 } from '@main/db/search'
 import { SNIPPET_MARK_END, SNIPPET_MARK_START } from '@shared/constants'
 import type { SearchResult } from '@shared/types'
-import { DAY, makeRepos, seedSession, type Repos } from './fixtures'
+import { DAY, line, makeRepos, seedSession, type Repos } from './fixtures'
 
 const NOW = Date.UTC(2026, 5, 1)
 const S = SNIPPET_MARK_START
@@ -89,6 +89,19 @@ describe('tokenize / query builders', () => {
     expect(tokenize('\u0301')).toEqual([]) // a lone combining mark is not a token
   })
 
+  it('drops possessives, contractions and one-letter pieces when a longer word exists', () => {
+    expect(tokenize("acme's")).toEqual(['acme'])
+    expect(tokenize('acme\u2019s plan')).toEqual(['acme', 'plan'])
+    expect(tokenize("we'll don't they're I've I'd I'm")).toEqual(['we', 'don', 'they'])
+    expect(tokenize('e-mail')).toEqual(['mail'])
+    expect(tokenize('AT&T contract')).toEqual(['at', 'contract'])
+    // Only one-letter tokens: kept (searched as one adjacent run).
+    expect(tokenize('Q&A')).toEqual(['q', 'a'])
+    expect(tokenize('s')).toEqual(['s'])
+    // A quote that is not an apostrophe inside a word does not drop the letter.
+    expect(tokenize("'s plan")).toEqual(['plan'])
+  })
+
   it('builds quoted prefix queries and trigram OR queries', () => {
     expect(buildFtsQuery(['enter', 'plan'])).toBe('"enter"* AND "plan"*')
     expect(buildFtsQuery(['a', 'b'], 'OR')).toBe('"a"* OR "b"*')
@@ -145,7 +158,43 @@ describe('SearchService.query', () => {
     const res = r.search.query('enterprise seat')
     expect(sessionIds(res)).toEqual(['pricing'])
     expect(res.groups[0]?.hits.map((h) => h.kind)).toEqual(['transcript'])
-    expect(sessionIds(r.search.query('enterprise login'))).toEqual([])
+    expect(sessionIds(r.search.query('enterprise nonexistentword'))).toEqual([])
+  })
+
+  it('finds meetings whose words are spread over several items (title, lines)', () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'acme',
+      title: 'Acme kickoff',
+      startedAt: NOW - DAY,
+      lines: [
+        ['them', 'we discussed pricing in detail'],
+        ['me', 'budget is tight'],
+      ],
+    })
+    seedSession(r, {
+      id: 'other',
+      title: 'Pricing sync',
+      startedAt: NOW - 2 * DAY,
+      lines: [['them', 'nothing about money here']],
+    })
+    seedSession(r, {
+      id: 'one-line',
+      title: 'Budget call',
+      startedAt: NOW - 3 * DAY,
+      lines: [['them', 'the pricing budget is final']],
+    })
+    expect(sessionIds(r.search.query('acme'))).toEqual(['acme'])
+    const acme = r.search.query('acme pricing')
+    expect(sessionIds(acme)).toEqual(['acme'])
+    expect(acme.fuzzy).toBe(false)
+    expect(acme.groups[0]?.hits.map((h) => h.kind).sort()).toEqual(['title', 'transcript'])
+    expect(acme.groups[0]?.hits.find((h) => h.kind === 'title')?.snippet).toBe(
+      `${S}Acme${E} kickoff`,
+    )
+    // All words in one line ranks above words spread over the meeting.
+    expect(sessionIds(r.search.query('pricing budget'))).toEqual(['one-line', 'acme'])
+    expect(sessionIds(r.search.query('acme money'))).toEqual([])
   })
 
   it('keeps at most 3 hits per session', () => {
@@ -258,8 +307,91 @@ describe('SearchService.query', () => {
     expect(sessionIds(r.search.query('text:enterprise'))).toEqual([])
     expect(sessionIds(r.search.query('enterprise:plan'))).toEqual(['pricing'])
     expect(sessionIds(r.search.query('NEAR(enterprise plan'))).toEqual([])
-    expect(sessionIds(r.search.query('enterprise AND plan'))).toEqual([])
+    // "AND" is a plain word too: this meeting says "and" in its notes, "enterprise plan" in a line.
+    expect(sessionIds(r.search.query('enterprise AND plan'))).toEqual(['pricing'])
+    expect(sessionIds(r.search.query('enterprise NOT plan'))).toEqual([])
     expect(sessionIds(r.search.query('-annually'))).toEqual(['pricing'])
+  })
+
+  it("ignores possessives and one-letter pieces (\"acme's\", 'Q&A')", () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'acme',
+      title: 'Acme kickoff',
+      startedAt: NOW - DAY,
+      lines: [['them', 'Acme wants a discount']],
+      notesMarkdown: 'Acme renewal planning',
+    })
+    seedSession(r, {
+      id: 'qa',
+      title: 'Q&A session',
+      startedAt: NOW - 2 * DAY,
+      lines: [['them', 'quick answer about apples']],
+    })
+    expect(sessionIds(r.search.query("acme's"))).toEqual(['acme'])
+    expect(sessionIds(r.search.query('acme\u2019s'))).toEqual(['acme'])
+    expect(sessionIds(r.search.query("Acme's renewal"))).toEqual(['acme'])
+    // "Q&A" is the adjacent run q, a — not any q-word plus any a-word.
+    const qa = r.search.query('Q&A')
+    expect(sessionIds(qa)).toEqual(['qa'])
+    expect(qa.groups[0]?.hits.map((h) => h.kind)).toEqual(['title'])
+  })
+
+  it('runs a bounded number of MATCH statements, however many hits it returns', async () => {
+    // A one-letter prefix has no prefix index; re-running MATCH once per hit for snippets
+    // froze the main process for seconds on a large history. Snippets are built in JS now.
+    const { default: Database } = await import('better-sqlite3')
+    const { runMigrations } = await import('@main/db/migrations')
+    const statements: string[] = []
+    const db = new Database(':memory:', { verbose: (sql) => statements.push(String(sql)) })
+    db.pragma('foreign_keys = ON')
+    runMigrations(db)
+    const r = makeRepos(db)
+    const words = ['sales', 'sync', 'status', 'scope', 'seats', 'some', 'say', 'sure']
+    db.transaction(() => {
+      for (let s = 0; s < 30; s++) {
+        r.sessions.create({ id: `m${s}`, modeId: null, startedAt: NOW - s * DAY })
+        r.sessions.setStatus(`m${s}`, 'done')
+        for (let i = 0; i < 20; i++) {
+          r.transcript.upsert(
+            line(`m${s}`, 'them', i * 1000, `${words[i % 8]} ${words[(i + s) % 8]} line ${i}`),
+          )
+        }
+      }
+    })()
+    for (const q of ['s', "sales's", 'say t']) {
+      statements.length = 0
+      const res = r.search.query(q)
+      expect(res.groups).toHaveLength(30)
+      expect(res.groups.reduce((n, g) => n + g.hits.length, 0)).toBeGreaterThan(60)
+      for (const g of res.groups) for (const h of g.hits) expect(h.snippet).toContain(S)
+      const matches = statements.filter((sql) => /\bMATCH\b/i.test(sql))
+      expect(matches.length).toBeLessThanOrEqual(3)
+    }
+  })
+
+  it('finds Bangla text whose stored form was not NFC (precomposed য়)', () => {
+    const r = makeRepos()
+    const precomposed = '\u09b8\u09ae\u09df' // সময় with U+09DF
+    expect(precomposed.normalize('NFC')).not.toBe(precomposed)
+    seedSession(r, {
+      id: 'bn',
+      title: `${precomposed} নিয়ে কথা`,
+      startedAt: NOW - DAY,
+      lines: [['them', `আমাদের ${precomposed} কম আছে`]],
+      notesMarkdown: `${precomposed} কম`,
+      actionItems: [{ text: `${precomposed} ঠিক করা` }],
+    })
+    for (const q of [precomposed, precomposed.normalize('NFC')]) {
+      const res = r.search.query(q)
+      expect(sessionIds(res)).toEqual(['bn'])
+      expect(res.fuzzy).toBe(false)
+    }
+    expect(r.search.retrieveForQuestion(`${precomposed} কত?`).length).toBeGreaterThan(0)
+    // Stored in NFC, so the stored text equals what queries are normalized to.
+    expect(r.transcript.listBySession('bn')[0]?.text).toBe(
+      `আমাদের ${precomposed} কম আছে`.normalize('NFC'),
+    )
   })
 
   it('returns an empty result for empty or whitespace queries', () => {
