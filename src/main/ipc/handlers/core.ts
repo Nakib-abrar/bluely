@@ -1,7 +1,7 @@
 import { app, clipboard, shell } from 'electron'
 import type { CoreContext } from '../../context'
 import { openExternalSafe } from '../../windows/security'
-import { isPortableBuild, setLaunchAtStartup } from '../../platform'
+import { isPortableBuild, setLaunchAtStartup, syncLaunchAtStartup } from '../../platform'
 import { handle } from '../registry'
 
 /** App, window, clipboard, settings, key and overlay-window handlers. */
@@ -79,4 +79,11 @@ export function registerCoreHandlers(ctx: CoreContext, opts: { quit: () => void 
     }
     log.setDebug(next.advanced.devLogging)
   })
+  // The sign-in entry is not stored with the setting and can go stale (reinstall, another
+  // install folder, a moved portable exe): re-sync it once per start.
+  try {
+    syncLaunchAtStartup(settings.get().general.launchAtStartup)
+  } catch (err) {
+    log.warn('Could not re-sync launch at startup', err)
+  }
 }

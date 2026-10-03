@@ -26,6 +26,19 @@ export function loopbackAudioOption(): LoopbackAudio {
   return null
 }
 
+/**
+ * Whether "Launch at startup" can be turned on in this build: Windows (installed, or portable
+ * started through its launcher) and macOS. Settings can hide or disable the toggle when false.
+ */
+export function canLaunchAtStartup(): boolean {
+  if (process.platform === 'win32') return win32.canLaunchAtStartup()
+  return process.platform === 'darwin'
+}
+
+/**
+ * Registers (or removes) Bluely as a sign-in item; does nothing on other platforms. On Windows,
+ * enabling throws when canLaunchAtStartup() is false instead of registering a temporary exe.
+ */
 export function setLaunchAtStartup(enabled: boolean): void {
   if (process.platform === 'win32') {
     win32.setLaunchAtStartup(enabled)
@@ -33,6 +46,26 @@ export function setLaunchAtStartup(enabled: boolean): void {
   }
   if (process.platform === 'darwin') {
     app.setLoginItemSettings({ openAtLogin: enabled })
+  }
+}
+
+/**
+ * Brings the sign-in entry in line with the launchAtStartup setting; called once per start.
+ * The entry lives outside Bluely's data and drifts from the setting: the uninstaller deletes it
+ * while the setting in %APPDATA%\Bluely survives a reinstall; reinstalling into another folder
+ * (or switching between "only for me" and "all users") runs the old uninstaller as an update,
+ * which keeps an entry pointing at the deleted exe; a portable exe can be moved. Skipped in
+ * unpackaged (dev/test) runs, which would otherwise rewrite or delete the installed app's
+ * entry (same value name).
+ */
+export function syncLaunchAtStartup(wanted: boolean): void {
+  if (!app.isPackaged) return
+  if (process.platform === 'win32') {
+    win32.syncLaunchAtStartup(wanted)
+    return
+  }
+  if (process.platform === 'darwin' && app.getLoginItemSettings().openAtLogin !== wanted) {
+    app.setLoginItemSettings({ openAtLogin: wanted })
   }
 }
 

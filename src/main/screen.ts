@@ -54,7 +54,10 @@ export async function captureScreen(overlay: OverlayController): Promise<Screens
   }
 }
 
-/** Only called when Settings › Privacy › "Save screenshots with sessions" is on (default off). */
+/**
+ * Only called when Settings › Privacy & Data › "Save screenshots with sessions" is on (it is
+ * off by default).
+ */
 export function saveScreenshot(
   dir: string,
   sessionId: string | null,

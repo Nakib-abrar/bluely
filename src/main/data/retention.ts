@@ -140,8 +140,8 @@ const unrefTimers: NonNullable<RetentionSchedulerOptions['timers']> = {
 
 /**
  * Applies the retention setting shortly after launch, every 12 hours, and right after the user
- * changes Settings › Privacy › Data retention. Runs never overlap: a request made while one is
- * in progress is coalesced into a single follow-up run. Each run also removes screenshot
+ * changes Settings › Privacy & Data › Data retention. Runs never overlap: a request made while
+ * one is in progress is coalesced into a single follow-up run. Each run also removes screenshot
  * folders whose meeting no longer exists.
  */
 export class RetentionScheduler {

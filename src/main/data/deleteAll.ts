@@ -12,10 +12,10 @@ export interface DeleteAllResult {
 const FTS_TABLES = ['search_fts', 'search_trigram', 'knowledge_chunks_fts'] as const
 
 /**
- * Settings › Privacy › Delete all data. Removes every meeting (with transcripts, AI messages
- * and action items through FK cascades), remaining AI messages, usage and latency stats,
- * knowledge files (chunks cascade) and custom modes, plus saved screenshots. Built-in modes,
- * settings and the API key are kept so the app keeps working.
+ * Settings › Privacy & Data › Delete all data. Removes every meeting (with transcripts, AI
+ * messages and action items through FK cascades), remaining AI messages, usage and latency
+ * stats, knowledge files (chunks cascade) and custom modes, plus saved screenshots. Built-in
+ * modes, settings and the API key are kept so the app keeps working.
  *
  * Deleted content should not linger on disk either: secure_delete zeroes freed pages, the
  * full-text indexes are merged so no deleted terms survive in old segments, and the WAL is

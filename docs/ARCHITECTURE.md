@@ -189,13 +189,34 @@ sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
   from inside an archive. better-sqlite3 13 ships N-API prebuilds, so there is no rebuild step
   (`npmRebuild: false`) and non-Windows prebuilds are excluded. `resources/` (tray icons) is
   copied next to the app as `extraResources`.
-- Targets: an **NSIS installer** (per-user, no admin, choosable folder, shortcuts, keeps
-  `%APPDATA%\Bluely` on uninstall) and a **portable exe**. Builds are not code-signed.
+- Targets: an **NSIS installer** and a **portable exe**. Builds are not code-signed. The
+  installer is assisted (`oneClick: false`, `perMachine: false`): an install-mode page offers
+  "only for me" (default; per-user in `%LOCALAPPDATA%\Programs\Bluely`, no admin) or "anyone who
+  uses this computer" (elevates, `Program Files`); the folder can be changed and shortcuts are
+  created. Uninstalling keeps `%APPDATA%\Bluely`; `build/installer.nsh` (`customUnInstall`)
+  removes the launch-at-startup `Run` value, except during an update.
+- **Launch at startup** (`src/main/platform/win32`): `app.setLoginItemSettings` writes
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (plus `StartupApproved\Run`) under the
+  value name `io.github.nakib-abrar.bluely` (the AppUserModelId = `appId`) with `--hidden`. The
+  portable build registers its launcher (`PORTABLE_EXECUTABLE_FILE`), never the copy it extracts
+  to `%TEMP%` and deletes on exit; `canLaunchAtStartup()` is false if that path is unknown.
+  The entry lives outside `%APPDATA%\Bluely` and can drift from the setting (the uninstaller
+  removes it but a reinstall keeps the setting; a reinstall into another folder keeps an entry
+  for the old exe; a portable exe can be moved), so every start of a packaged build calls
+  `syncLaunchAtStartup()` from the core handlers: it rewrites the entry when it does not already
+  start this exe with `--hidden` (a matching entry is left alone, so a Task Manager "Disabled"
+  stays), and deletes it when the setting is off. Unpackaged runs (`pnpm dev`, E2E against
+  `out/`) skip this.
 - **Releases**: `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`:
-  typecheck, lint, unit tests, build, then `electron-builder --publish always`, which uploads the
-  Setup exe, its blockmap, the portable exe and `latest.yml` to the GitHub Release; a
-  `SHA256SUMS.txt` is attached and printed in the job summary. Manual runs are dry runs that
-  upload workflow artifacts.
+  typecheck, lint, unit tests, build, then `electron-builder --publish never` and
+  `SHA256SUMS.txt` (also printed in the job summary). The publish step uploads with `gh`: a new
+  release is created as a **draft**, then the Setup exe, its blockmap, the portable exe,
+  `latest.yml` and finally `SHA256SUMS.txt` are attached one by one, and only then is the release
+  published, so the auto-updater never sees a half-uploaded release. Re-running on an existing
+  release replaces all of its files from the new build; a failed upload fails the job.
+  (electron-builder's own publisher silently skips releases published more than 2 hours ago,
+  which is why it is not used.) Manual runs are dry runs that upload workflow artifacts unless
+  _publish_ is checked on a `v*` tag.
 - **Auto-update** (`src/main/updater.ts`): electron-updater with the GitHub provider, installed
   (NSIS) builds only. It checks ~10 s after start and every 6 h, never downloads without the user
   clicking _Download_, verifies the installer's SHA-512 from `latest.yml`, and installs on
@@ -203,4 +224,6 @@ sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
   "unsupported" and never contact GitHub. State is pushed to the UI as `updater:status`.
 - **Electron pin**: `electron` is pinned to an exact version (43.7.7). Desktop loopback has
   regressed between Electron versions before, so any upgrade must pass
-  [the loopback verifier](VERIFY_LOOPBACK.md) on Windows.
+  [the loopback verifier](VERIFY_LOOPBACK.md) on Windows. 43.7.7 passes it in Windows CI
+  (`loopback-windows.yml`, Windows Server 2022 and 2025 with a virtual sound card) but has not yet
+  been verified on a physical Windows 10/11 PC; see the results table there.

@@ -5,6 +5,13 @@ name: Release
 #   Setup exe, portable exe, blockmap, latest.yml (read by the auto-updater) and SHA256SUMS.txt.
 # - Run manually (workflow_dispatch) for a dry run that only uploads workflow artifacts, or with
 #   `publish` checked on a `v*` tag to (re)publish that release.
+#
+# electron-builder only packages (--publish never); the "Publish" step uploads the files with gh.
+# electron-builder's own publisher silently skips (exit 0) a release published more than 2 hours
+# ago, which made a re-run attach SHA256SUMS.txt for binaries that were never uploaded. Now a new
+# release is created as a draft and published only after every file, checksums last, is attached
+# (the auto-updater never sees a half-uploaded release); a re-run replaces all files of an
+# existing release from the same build; and any failed upload fails the job.
 
 on:
   push:
@@ -47,8 +54,8 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Bluely $VERSION (publish: $PUBLISH, ref: $GITHUB_REF)"
-          # electron-builder publishes to the release tagged v<package.json version>; refuse to
-          # publish from any other ref so a release can never point at the wrong commit.
+          # The release is tagged v<package.json version> (and latest.yml names that version);
+          # refuse to publish from any other ref so a release can never point at the wrong commit.
           if [ "$PUBLISH" = "true" ] && [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
             echo "::error::Publishing needs the tag v$VERSION (from package.json), but this run is on $GITHUB_REF."
             exit 1
@@ -69,14 +76,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Package and publish to GitHub Releases
-        if: env.PUBLISH == 'true'
-        run: pnpm exec electron-builder --win --x64 --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Package (dry run, no upload)
-        if: env.PUBLISH != 'true'
+      - name: Package
         run: pnpm exec electron-builder --win --x64 --publish never
 
       - name: SHA-256 checksums
@@ -97,12 +97,44 @@ jobs:
             echo 'Verify on Windows: `Get-FileHash .\Bluely-Setup-'"$VERSION"'.exe -Algorithm SHA256`'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Attach SHA256SUMS.txt to the release
+      - name: Publish to GitHub Releases
         if: env.PUBLISH == 'true'
         shell: bash
-        run: gh release upload "v$VERSION" release/SHA256SUMS.txt --clobber
+        working-directory: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="v$VERSION"
+          # Upload order matters when replacing the files of a release that is already public:
+          # installers first, then latest.yml (which points the auto-updater at them), then the
+          # checksums of exactly these installers.
+          ASSETS=(
+            "Bluely-Setup-$VERSION.exe"
+            "Bluely-Setup-$VERSION.exe.blockmap"
+            "Bluely-$VERSION-portable.exe"
+            latest.yml
+            SHA256SUMS.txt
+          )
+          for f in "${ASSETS[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::release/$f was not built; nothing was uploaded."
+              exit 1
+            fi
+          done
+          if IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
+            echo "Release $TAG already exists (draft: $IS_DRAFT); replacing all of its files."
+          else
+            gh release create "$TAG" --draft --verify-tag --title "Bluely $VERSION" \
+              --notes "What changed: [CHANGELOG.md](https://github.com/$GH_REPO/blob/$TAG/CHANGELOG.md). Check downloads against SHA256SUMS.txt (see the README, Install)."
+          fi
+          # One file per call so the order holds; any failed upload stops the job here, before
+          # SHA256SUMS.txt is attached and before the release is published.
+          for f in "${ASSETS[@]}"; do
+            gh release upload "$TAG" "$f" --clobber
+          done
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG: ${ASSETS[*]}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

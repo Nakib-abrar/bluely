@@ -32,8 +32,10 @@ Initial release: an open-source AI meeting copilot for Windows, powered by OpenR
   Alt+Enter preset, tray icon, consent reminder with one-click disclosure message.
 - Local-first storage in `%APPDATA%\Bluely` with retention, export all and delete all; API key
   encrypted with Windows DPAPI.
-- Windows NSIS installer (per-user) and portable exe, built and published by GitHub Actions with
-  SHA-256 checksums; auto-update from GitHub Releases for installed builds.
+- Windows NSIS installer (for the current user by default, or for all users with admin rights;
+  uninstalling removes the launch-at-startup entry) and portable exe, built and published by
+  GitHub Actions with SHA-256 checksums (the release is published only once every file is
+  attached); auto-update from GitHub Releases for installed builds.
 - Loopback verifier (`scripts/verify-loopback/`) to check desktop audio capture for any
   Electron version.
 
