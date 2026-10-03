@@ -146,6 +146,7 @@ async function start(): Promise<void> {
     },
     quit,
     isLive: () => !!features?.isLive(),
+    captureFailed: () => !!features?.captureFailed(),
     isOverlayVisible: () => overlay.isVisible(),
   })
   events.subscribe('session:state', () => tray?.refresh())

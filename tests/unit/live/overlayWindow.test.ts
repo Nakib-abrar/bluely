@@ -192,16 +192,37 @@ describe('OverlayController: the capture window is never closed mid-call (F6, OV
     h.overlay.onRendererGone(gone)
     h.win().webContents.emit('render-process-gone', {}, { reason: 'crashed' })
     expect(gone).toHaveBeenCalledTimes(1)
+    expect(gone).toHaveBeenCalledWith({ restarting: true })
     expect(h.win().webContents.reload).toHaveBeenCalledTimes(1)
   })
 
-  it('stops reloading a renderer that keeps crashing', () => {
+  it('gives up on a renderer that keeps crashing: says so, and the next show starts afresh', () => {
     const h = setup()
     h.overlay.show()
-    for (let i = 0; i < 5; i++) {
-      h.win().webContents.emit('render-process-gone', {}, { reason: 'oom' })
+    const gone = vi.fn()
+    h.overlay.onRendererGone(gone)
+    const first = h.win()
+    for (let i = 0; i < 4; i++) {
+      first.webContents.emit('render-process-gone', {}, { reason: 'oom' })
     }
-    expect(h.win().webContents.reload).toHaveBeenCalledTimes(3)
+    expect(first.webContents.reload).toHaveBeenCalledTimes(3)
+    expect(gone.mock.calls.map(([info]) => info)).toEqual([
+      { restarting: true },
+      { restarting: true },
+      { restarting: true },
+      { restarting: false },
+    ])
+    // Not left behind as a blank window: it is gone, and the tray and shortcuts know it.
+    expect(first.destroyed).toBe(true)
+    expect(h.overlay.window).toBeNull()
+    expect(h.overlay.isVisible()).toBe(false)
+    expect(h.visibility.at(-1)).toMatchObject({ visible: false })
+
+    // Tray › Show overlay (or Ctrl+\, or a new call) builds a new renderer, which restarts capture.
+    h.overlay.show()
+    expect(h.win()).not.toBe(first)
+    expect(h.win().visible).toBe(true)
+    expect(h.overlay.window).not.toBeNull()
   })
 })
 

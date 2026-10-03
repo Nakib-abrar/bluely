@@ -5,9 +5,14 @@ export const live = {
   noTranscript: 'Nothing was transcribed in this session.',
   screenUnavailable: 'Could not capture the screen; answered without it.',
   captureLost: 'Audio capture stopped unexpectedly. Restarting it…',
+  captureFailed: 'Audio capture keeps crashing; nothing is being transcribed.',
   captureStartTimeout: 'Audio capture did not start.',
   sttLost: 'Some speech could not be transcribed (lost: {count}).',
   updateBlockedLive: 'Stop the call before restarting to update.',
+  updateBlockedNotes:
+    'The notes of the last call are still being written. Restart to update once they are done.',
+  trayCaptureFailed: 'Not capturing audio: show the overlay to retry',
+  trayTooltipCaptureFailed: 'Bluely: not capturing audio',
   notices: {
     noKeyTitle: 'Add your OpenRouter API key',
     noKeyBody: 'Bluely needs a key to transcribe calls and suggest replies.',
@@ -27,5 +32,8 @@ export const live = {
     keybindsTakenTitle: 'Some shortcuts are taken by another app',
     keybindsTakenBody: '{keys} will not work until you pick other keys or close the other app.',
     keybindsTakenAction: 'Open keybinds',
+    captureFailedTitle: 'Bluely is not capturing this call',
+    captureFailedBody:
+      'The overlay, which records the audio, keeps crashing, so nothing new is being transcribed. Show the overlay again (tray › Show overlay) to retry, or stop the call and start a new one.',
   },
 } as const

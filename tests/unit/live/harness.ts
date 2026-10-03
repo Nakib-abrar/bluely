@@ -140,6 +140,7 @@ export function createHarness() {
     emitted.push({ event, payload })
   }) as EventBus['sendTo']
   const log = createLogger(null)
+  const rendererGoneListeners = new Set<(info: { restarting: boolean }) => void>()
   const overlay = {
     window: null,
     show: vi.fn(),
@@ -149,6 +150,14 @@ export function createHarness() {
     isVisible: () => true,
     currentDisplay: vi.fn(),
     withHidden: async <T>(fn: () => Promise<T>) => fn(),
+    onRendererGone: (fn: (info: { restarting: boolean }) => void) => {
+      rendererGoneListeners.add(fn)
+      return () => rendererGoneListeners.delete(fn)
+    },
+    /** Test helper: the overlay renderer crashed (and is reloaded when `restarting`). */
+    rendererGone: (restarting: boolean) => {
+      for (const fn of rendererGoneListeners) fn({ restarting })
+    },
   }
   const ctx = {
     env: {

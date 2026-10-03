@@ -330,11 +330,13 @@ export class Updater {
 
 /**
  * Registers the updater IPC handlers and starts background checks (installed builds only).
- * `isSessionLive`: "Restart to update" is refused during a call, since installing quits Bluely.
+ * `sessionBusy`: installing quits Bluely, so "Restart to update" is refused during a call
+ * ('live') and while the notes of one that just ended are being written ('notes'), which
+ * quitting would abandon (the call would come back as 'recovered', its notes to pay for again).
  */
 export function wireUpdater(
   ctx: CoreContext,
-  opts: { isPortable: boolean; isSessionLive?: () => boolean },
+  opts: { isPortable: boolean; sessionBusy?: () => 'live' | 'notes' | null },
 ): Updater {
   const updater = new Updater({
     events: ctx.events,
@@ -345,7 +347,9 @@ export function wireUpdater(
   handle('updater:check', () => updater.check())
   handle('updater:download', () => updater.download())
   handle('updater:install', () => {
-    if (opts.isSessionLive?.()) throw new AppError('session_live', t('live.updateBlockedLive'))
+    const busy = opts.sessionBusy?.() ?? null
+    if (busy === 'live') throw new AppError('session_live', t('live.updateBlockedLive'))
+    if (busy === 'notes') throw new AppError('busy', t('live.updateBlockedNotes'))
     updater.install()
   })
   handle('updater:getStatus', () => updater.status())

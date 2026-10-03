@@ -27,7 +27,8 @@ const RELOAD_WINDOW_MS = 60_000
  *
  * Audio capture runs in its renderer, so the window is never closed while Bluely runs: a close
  * request (Alt+F4) hides it, and a crashed renderer is reloaded (it restarts capture for the
- * live session by itself).
+ * live session by itself). A renderer that keeps crashing is not reloaded again: its window is
+ * destroyed, and the next show (tray, Ctrl+\, a new call) builds a fresh one.
  */
 export class OverlayController {
   private win: BrowserWindow | null = null
@@ -37,7 +38,7 @@ export class OverlayController {
   /** Set when Bluely quits (or Windows ends the session): closing is allowed from then on. */
   private closing = false
   private readonly reloads: number[] = []
-  private readonly rendererGoneListeners = new Set<() => void>()
+  private readonly rendererGoneListeners = new Set<(info: RendererGoneInfo) => void>()
   /** The y the user chose, while expanding near the bottom edge pushed the window up. */
   private preferredY: number | null = null
   /** Bounds this controller set last, to tell its own moves from the user's. */
@@ -55,8 +56,11 @@ export class OverlayController {
     })
   }
 
-  /** `fn` runs when the overlay renderer crashed or was killed (it is reloaded right after). */
-  onRendererGone(fn: () => void): () => void {
+  /**
+   * `fn` runs when the overlay renderer crashed or was killed. It is reloaded right after
+   * (`restarting`), unless it keeps crashing: then it stays gone until the overlay is shown again.
+   */
+  onRendererGone(fn: (info: RendererGoneInfo) => void): () => void {
     this.rendererGoneListeners.add(fn)
     return () => this.rendererGoneListeners.delete(fn)
   }
@@ -288,23 +292,27 @@ export class OverlayController {
   private handleRendererGone(win: BrowserWindow, reason: string): void {
     if (this.closing || win.isDestroyed()) return
     this.deps.log.error(`Overlay renderer gone (${reason})`)
-    for (const fn of this.rendererGoneListeners) {
-      try {
-        fn()
-      } catch (err) {
-        this.deps.log.error('Overlay renderer-gone listener failed', err)
-      }
-    }
     const now = Date.now()
     while (this.reloads.length && now - (this.reloads[0] ?? 0) > RELOAD_WINDOW_MS) {
       this.reloads.shift()
     }
-    if (this.reloads.length >= MAX_RELOADS) {
-      this.deps.log.error('Overlay renderer keeps crashing; not reloading it again')
+    const restarting = this.reloads.length < MAX_RELOADS
+    for (const fn of this.rendererGoneListeners) {
+      try {
+        fn({ restarting })
+      } catch (err) {
+        this.deps.log.error('Overlay renderer-gone listener failed', err)
+      }
+    }
+    if (restarting) {
+      this.reloads.push(now)
+      win.webContents.reload()
       return
     }
-    this.reloads.push(now)
-    win.webContents.reload()
+    // A dead window would come back blank on the next show; build a fresh one then instead.
+    // destroy() skips the 'close' guard; 'closed' reports the overlay hidden.
+    this.deps.log.error('Overlay renderer keeps crashing; not reloading it again')
+    win.destroy()
   }
 
   /**
@@ -368,6 +376,11 @@ export class OverlayController {
       expanded: this.expanded,
     })
   }
+}
+
+export interface RendererGoneInfo {
+  /** The renderer is being reloaded (false: it keeps crashing and stays gone for now). */
+  restarting: boolean
 }
 
 interface CaptureHold {

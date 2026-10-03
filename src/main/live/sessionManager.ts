@@ -118,6 +118,8 @@ export class SessionManager implements LiveContextSource {
   /** Kept Me lines that may still be retracted as echo before they may cancel auto-suggest. */
   private deferredMe = new Map<string, { line: TranscriptLine; deadline: number }>()
   private deferredMeTimer: ReturnType<typeof setTimeout> | null = null
+  /** The overlay renderer keeps crashing and is not reloaded: nothing of this call is captured. */
+  private captureDead = false
 
   constructor(
     private readonly ctx: CoreContext,
@@ -208,6 +210,15 @@ export class SessionManager implements LiveContextSource {
     )
   }
 
+  /**
+   * Audio capture of the current call has stopped for good: the overlay renderer it runs in
+   * keeps crashing. It lasts until capture reports 'listening' again (overlay shown again) or
+   * the call ends. The main window and the tray say so; the overlay is gone.
+   */
+  captureFailed(): boolean {
+    return this.captureDead && this.isLive()
+  }
+
   /** Notes, action items or the email of an ended call are still being generated. */
   isPostCallRunning(): boolean {
     return this.postCallJobs.size > 0
@@ -264,6 +275,7 @@ export class SessionManager implements LiveContextSource {
     this.deferredMe.clear()
     this.lostSegments = 0
     this.lastErrorKind = null
+    this.captureDead = false
     this.lastSession = session.id
     this.deps.ai.resetLive()
     this.queue = this.deps.stt.createQueue({
@@ -363,6 +375,7 @@ export class SessionManager implements LiveContextSource {
     this.retrying.clear()
     this.autoSuggestOverride = null
     this.lastErrorKind = null
+    this.captureDead = false
     this.deps.history.sessions.end(sessionId, Date.now())
     this.patch({
       status: 'processing',
@@ -405,6 +418,7 @@ export class SessionManager implements LiveContextSource {
       this.deps.history.sessions.end(sessionId, Date.now())
       this.deps.history.sessions.setStatus(sessionId, 'recovered')
     }
+    this.captureDead = false
     this.state = idleState(this.state.modeId)
   }
 
@@ -467,6 +481,8 @@ export class SessionManager implements LiveContextSource {
     code: ChannelErrorCode | null = null,
   ): void {
     if (sessionId !== this.state.sessionId) return
+    // Capture runs again (the overlay was shown again after its renderer kept crashing).
+    if (state === 'listening') this.captureDead = false
     const status: ChannelStatus = { state, error, code }
     const audio = { ...this.state.audio, [channel]: status }
     const anyListening = audio.me.state === 'listening' || audio.them.state === 'listening'
@@ -499,11 +515,13 @@ export class SessionManager implements LiveContextSource {
   }
 
   /**
-   * The overlay renderer, where capture runs, crashed or was killed and is being reloaded.
-   * Until the new renderer reports 'listening' again both channels show an error, so the call
-   * never looks live while nothing is being captured.
+   * The overlay renderer, where capture runs, crashed or was killed. Until a renderer reports
+   * 'listening' again both channels show an error, so the call never looks live while nothing
+   * is being captured. `restarting`: the renderer is being reloaded and restarts capture by
+   * itself. Otherwise it keeps crashing and stays gone, and captureFailed() turns true so the
+   * main window and the tray (the overlay is gone) tell the user to show it again or stop.
    */
-  captureLost(): void {
+  captureLost(restarting = true): void {
     const sessionId = this.state.sessionId
     if (!sessionId) return
     if (this.state.status === 'stopping') {
@@ -512,10 +530,15 @@ export class SessionManager implements LiveContextSource {
       return
     }
     if (this.state.status !== 'starting' && this.state.status !== 'live') return
+    if (!restarting) {
+      this.ctx.log.error('Audio capture stopped: the overlay renderer keeps crashing')
+      this.captureDead = true
+    }
     this.scheduler.setThemSpeaking(false)
     this.themSpeakingSinceMs = null
+    const message = restarting ? t('live.captureLost') : t('live.captureFailed')
     for (const channel of CHANNELS) {
-      this.setChannelStatus(sessionId, channel, 'error', t('live.captureLost'), 'unknown')
+      this.setChannelStatus(sessionId, channel, 'error', message, 'unknown')
     }
   }
 

@@ -1,15 +1,126 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { LiveSessionState, OverlayCommand } from '@shared/types'
+import type { LiveSessionState, Notice, OverlayCommand } from '@shared/types'
 
 // features.ts pulls in the updater; keep electron-updater out of unit tests.
 vi.mock('electron-updater', () => ({ autoUpdater: {} }))
 
 import type { CoreContext } from '@main/context'
-import { onSessionsChanged, shortcutActions } from '@main/features'
+import { onSessionsChanged, sessionBusy, shortcutActions, watchCapture } from '@main/features'
 import { AiService } from '@main/live/aiService'
+import { NoticeCenter } from '@main/live/notices'
 import { PostCallRunner } from '@main/live/postCallRunner'
 import { SessionManager } from '@main/live/sessionManager'
+import type { ChatRequest, ChatResult } from '@main/providers/llm/LLMProvider'
 import { createHarness, segment } from './harness'
+
+/** A SessionManager on the shared harness, with post-call (Notes model) requests gated. */
+function sessionHarness() {
+  const h = createHarness()
+  const ai = new AiService(h.ctx, h.models, h.modes, h.history)
+  const postCall = new PostCallRunner(h.ctx, h.models, h.history)
+  const session = new SessionManager(h.ctx, {
+    models: h.models,
+    stt: h.stt,
+    history: h.history,
+    modes: h.modes,
+    ai,
+    postCall,
+  })
+  const lastState = () => h.eventsOf('session:state').at(-1) as LiveSessionState
+  const notices = () => h.eventsOf('app:notices').at(-1) as Notice[] | undefined
+  const gatePostCall = () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const complete = h.llm.complete.bind(h.llm)
+    h.llm.complete = async (req: ChatRequest): Promise<ChatResult> => {
+      await gate
+      return complete(req)
+    }
+    return () => release()
+  }
+  return { h, ai, session, lastState, notices, gatePostCall }
+}
+
+describe('"Restart to update" is refused while work would be cut short (mainui F14)', () => {
+  it('during a call, and while the notes of the call that ended are written', async () => {
+    const { h, session, lastState, gatePostCall } = sessionHarness()
+    expect(sessionBusy(session)).toBeNull()
+    const release = gatePostCall()
+    const { sessionId } = await session.start()
+    session.setChannelStatus(sessionId, 'them', 'listening', null)
+    expect(sessionBusy(session)).toBe('live')
+    const t0 = lastState().startedAt as number
+    session.acceptSegment(segment(sessionId, 'them', t0, t0 + 1000))
+    h.queues[0]!.deliver(h.queues[0]!.jobs[0]!, 'Let us send the pricing sheet tomorrow.')
+    await session.stop()
+    expect(lastState().status).toBe('processing')
+    expect(sessionBusy(session)).toBe('notes')
+    release()
+    await session.whenPostCallIdle()
+    expect(sessionBusy(session)).toBeNull()
+  })
+})
+
+describe('an overlay that keeps crashing is reported outside the overlay (live F6/OV-04)', () => {
+  function setup() {
+    const s = sessionHarness()
+    const center = new NoticeCenter(s.h.ctx, s.h.history)
+    watchCapture(s.h.ctx, { session: s.session, notices: center })
+    const banner = () => s.notices()?.find((n) => n.id === 'capture-failed')
+    return { ...s, banner }
+  }
+
+  it('a reloaded renderer only marks the channels; one that stays gone raises a banner', async () => {
+    const { h, session, lastState, banner } = setup()
+    const { sessionId } = await session.start()
+    session.setChannelStatus(sessionId, 'me', 'listening', null)
+    session.setChannelStatus(sessionId, 'them', 'listening', null)
+
+    h.overlay.rendererGone(true)
+    expect(lastState().audio.me).toMatchObject({
+      state: 'error',
+      error: 'Audio capture stopped unexpectedly. Restarting it…',
+    })
+    expect(session.captureFailed()).toBe(false)
+    expect(banner()).toBeUndefined()
+
+    h.overlay.rendererGone(false)
+    expect(session.captureFailed()).toBe(true)
+    expect(lastState()).toMatchObject({ status: 'live', sessionId })
+    expect(lastState().audio.them.error).toBe(
+      'Audio capture keeps crashing; nothing is being transcribed.',
+    )
+    expect(banner()).toMatchObject({
+      kind: 'error',
+      title: 'Bluely is not capturing this call',
+      dismissible: false,
+    })
+
+    // Shown again: the new overlay renderer restarts capture and the banner goes away.
+    session.setChannelStatus(sessionId, 'me', 'listening', null)
+    expect(session.captureFailed()).toBe(false)
+    expect(banner()).toBeUndefined()
+  })
+
+  it('the banner goes away when the call is stopped', async () => {
+    const { h, session, banner } = setup()
+    const { sessionId } = await session.start()
+    session.setChannelStatus(sessionId, 'me', 'listening', null)
+    h.overlay.rendererGone(false)
+    expect(banner()).toBeDefined()
+    await session.stop()
+    expect(session.captureFailed()).toBe(false)
+    expect(banner()).toBeUndefined()
+    await session.whenPostCallIdle()
+  })
+
+  it('a crash while no call runs raises nothing', () => {
+    const { h, session, banner } = setup()
+    h.overlay.rendererGone(false)
+    expect(session.captureFailed()).toBe(false)
+    expect(banner()).toBeUndefined()
+  })
+})
 
 describe('global action shortcuts (OV-02)', () => {
   function overlayCtx(visible: boolean) {

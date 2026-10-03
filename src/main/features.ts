@@ -25,6 +25,8 @@ export interface Features {
    * main window then minimizes instead of quitting (quitting would abandon that work).
    */
   isBusy(): boolean
+  /** The live call is no longer captured (the overlay keeps crashing); the tray says so. */
+  captureFailed(): boolean
   toggleSession(): void
   /** Called once before quitting; must finish quickly. */
   shutdown(): Promise<void>
@@ -42,7 +44,7 @@ export function wireFeatures(ctx: CoreContext): Features {
   registerLiveHandlers(ctx, { session, ai, notices })
   const updater = wireUpdater(ctx, {
     isPortable: isPortableBuild(),
-    isSessionLive: () => session.isLive(),
+    sessionBusy: () => sessionBusy(session),
   })
 
   models.onValidation((results) => notices.setModelValidation(results))
@@ -60,14 +62,14 @@ export function wireFeatures(ctx: CoreContext): Features {
   ctx.events.subscribe('sessions:changed', ({ id }) =>
     onSessionsChanged(ctx, { session, ai, history, modes }, id),
   )
-  // Capture runs in the overlay renderer; the overlay reloads it after a crash.
-  ctx.overlay.onRendererGone(() => session.captureLost())
+  watchCapture(ctx, { session, notices })
 
   const shortcuts = wireShortcuts(ctx, shortcutActions(ctx, { session }))
 
   return {
     isLive: () => session.isLive(),
     isBusy: () => session.isLive() || session.isPostCallRunning(),
+    captureFailed: () => session.captureFailed(),
     toggleSession: () => session.toggle(),
     shutdown: async () => {
       shortcuts.dispose()
@@ -77,6 +79,35 @@ export function wireFeatures(ctx: CoreContext): Features {
       await models.dispose()
     },
   }
+}
+
+/**
+ * Why quitting now would cut work short: a call is live, or the notes of one that ended are
+ * still being written. "Restart to update" is refused then. Exported for tests.
+ */
+export function sessionBusy(
+  session: Pick<SessionManager, 'isLive' | 'isPostCallRunning'>,
+): 'live' | 'notes' | null {
+  if (session.isLive()) return 'live'
+  return session.isPostCallRunning() ? 'notes' : null
+}
+
+/**
+ * Capture runs in the overlay renderer. The overlay reloads a crashed renderer, which restarts
+ * capture; one that keeps crashing stays gone, and a banner in the main window then says that
+ * the call is no longer captured (until capture runs again or the call ends). Exported for tests.
+ */
+export function watchCapture(
+  ctx: CoreContext,
+  deps: {
+    session: Pick<SessionManager, 'captureLost' | 'captureFailed'>
+    notices: Pick<NoticeCenter, 'setCaptureFailed'>
+  },
+): void {
+  ctx.overlay.onRendererGone(({ restarting }) => deps.session.captureLost(restarting))
+  ctx.events.subscribe('session:state', () =>
+    deps.notices.setCaptureFailed(deps.session.captureFailed()),
+  )
 }
 
 /** What the global shortcuts do. Exported for tests. */

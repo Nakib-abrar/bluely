@@ -16,14 +16,15 @@ function isTaken(s: KeybindStatus): boolean {
 }
 
 /**
- * Aggregates the main-window banners: missing key, shortcuts taken by another app, replaced
- * default models, recovered sessions and updates. Dismissals persist in
- * settings.general.dismissedNotices.
+ * Aggregates the main-window banners: audio capture of the live call failed, missing key,
+ * shortcuts taken by another app, replaced default models, recovered sessions and updates.
+ * Dismissals persist in settings.general.dismissedNotices.
  */
 export class NoticeCenter {
   private modelNotices: Notice[] = []
   private updateNotice: Notice | null = null
   private takenKeybinds: KeybindStatus[] = []
+  private captureFailed = false
 
   constructor(
     private readonly ctx: CoreContext,
@@ -39,6 +40,16 @@ export class NoticeCenter {
   list(): Notice[] {
     const dismissed = new Set(this.ctx.settings.get().general.dismissedNotices)
     const notices: Notice[] = []
+    if (this.captureFailed) {
+      notices.push({
+        id: 'capture-failed',
+        kind: 'error',
+        title: t('live.notices.captureFailedTitle'),
+        body: t('live.notices.captureFailedBody'),
+        action: null,
+        dismissible: false,
+      })
+    }
     if (!this.ctx.secrets.getKey() && this.ctx.settings.get().general.onboardingComplete) {
       notices.push({
         id: 'no-key',
@@ -114,6 +125,17 @@ export class NoticeCenter {
     const key = (list: KeybindStatus[]) => list.map((s) => `${s.id}:${s.accelerator}`).join('|')
     if (key(taken) === key(this.takenKeybinds)) return
     this.takenKeybinds = taken
+    this.publish()
+  }
+
+  /**
+   * The live call's audio capture stopped for good (SessionManager.captureFailed()): the overlay
+   * that records it keeps crashing and is gone, so the main window must say so. Shown until
+   * capture runs again or the call ends.
+   */
+  setCaptureFailed(failed: boolean): void {
+    if (failed === this.captureFailed) return
+    this.captureFailed = failed
     this.publish()
   }
 

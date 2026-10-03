@@ -486,6 +486,32 @@ describe('SessionManager: capture start and loss (live F11, OV-12, F6/OV-04)', (
     expect(h.lastState().audio.me.state).toBe('listening')
   })
 
+  it('a renderer that keeps crashing marks the call as not captured until capture runs again', async () => {
+    const h = setup()
+    const first = await h.live()
+    h.session.captureLost(false)
+    expect(h.session.captureFailed()).toBe(true)
+    expect(h.lastState().audio.me).toEqual({
+      state: 'error',
+      error: 'Audio capture keeps crashing; nothing is being transcribed.',
+      code: 'unknown',
+    })
+    // A later reload alone proves nothing; capture listening again does.
+    h.session.captureLost(true)
+    expect(h.session.captureFailed()).toBe(true)
+    h.session.setChannelStatus(first.sessionId, 'them', 'listening', null)
+    expect(h.session.captureFailed()).toBe(false)
+
+    // Never carried into the next call.
+    h.session.captureLost(false)
+    await h.session.stop()
+    expect(h.session.captureFailed()).toBe(false)
+    await h.session.start()
+    expect(h.session.captureFailed()).toBe(false)
+    await h.session.stop()
+    await h.session.whenPostCallIdle()
+  })
+
   it('stop does not wait for a crashed renderer to flush its audio', async () => {
     const h = setup()
     ;(h.overlay as { window: unknown }).window = {}
