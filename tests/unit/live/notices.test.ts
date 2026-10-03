@@ -21,7 +21,12 @@ describe('NoticeCenter: shortcuts taken by another app (platform F6)', () => {
       }),
       status({ id: 'askAssist', accelerator: 'CommandOrControl+Enter' }),
       // Inactive by design (overlay hidden): not a problem.
-      status({ id: 'moveOverlay', accelerator: 'CommandOrControl', registered: false, reason: 'inactive' }),
+      status({
+        id: 'moveOverlay',
+        accelerator: 'CommandOrControl',
+        registered: false,
+        reason: 'inactive',
+      }),
     ])
     const banner = notices.list().find((n) => n.id.startsWith('keybinds-taken-')) as Notice
     expect(banner).toMatchObject({

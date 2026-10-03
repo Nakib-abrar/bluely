@@ -57,8 +57,19 @@ describe('live IPC handlers', () => {
       'Not allowed',
       'mic_denied',
     )
-    h.call('audio:channelStatus', { sessionId: 's1', channel: 'them', state: 'listening', error: null })
-    expect(h.session.setChannelStatus).toHaveBeenLastCalledWith('s1', 'them', 'listening', null, null)
+    h.call('audio:channelStatus', {
+      sessionId: 's1',
+      channel: 'them',
+      state: 'listening',
+      error: null,
+    })
+    expect(h.session.setChannelStatus).toHaveBeenLastCalledWith(
+      's1',
+      'them',
+      'listening',
+      null,
+      null,
+    )
   })
 
   it("'sessions:regenerate' passes the requested parts", () => {

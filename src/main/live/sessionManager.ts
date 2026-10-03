@@ -300,7 +300,10 @@ export class SessionManager implements LiveContextSource {
       autoSuggest: this.autoSuggestEnabled(),
       showConsentReminder: settings.general.consentReminder,
     }
-    this.startTimer = setTimeout(() => this.captureStartTimedOut(session.id), CAPTURE_START_TIMEOUT_MS)
+    this.startTimer = setTimeout(
+      () => this.captureStartTimedOut(session.id),
+      CAPTURE_START_TIMEOUT_MS,
+    )
     this.startTimer.unref?.()
     this.emit()
     this.ctx.events.broadcast('sessions:changed', { id: session.id })
@@ -653,7 +656,10 @@ export class SessionManager implements LiveContextSource {
 
   /** True while Them speech within the echo window of `line` has not been transcribed yet. */
   private mayBeEcho(line: TranscriptLine): boolean {
-    if (this.themSpeakingSinceMs !== null && this.themSpeakingSinceMs <= line.endMs + ECHO_WINDOW_MS)
+    if (
+      this.themSpeakingSinceMs !== null &&
+      this.themSpeakingSinceMs <= line.endMs + ECHO_WINDOW_MS
+    )
       return true
     for (const seg of this.themInFlight.values()) {
       if (seg.startMs <= line.endMs + ECHO_WINDOW_MS && seg.endMs >= line.startMs - ECHO_WINDOW_MS)
@@ -716,7 +722,11 @@ export class SessionManager implements LiveContextSource {
     })
   }
 
-  private onSttError(job: TranscriptionJob, err: ProviderError, info: TranscriptionErrorInfo): void {
+  private onSttError(
+    job: TranscriptionJob,
+    err: ProviderError,
+    info: TranscriptionErrorInfo,
+  ): void {
     if (job.sessionId !== this.state.sessionId) {
       this.retrying.delete(job.id)
       return

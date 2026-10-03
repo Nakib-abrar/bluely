@@ -169,7 +169,8 @@ function setup(opts: { secrets?: SecretStore } = {}) {
     return () => release()
   }
   const autoRequests = () => h.llm.requests.filter((r) => r.tag === 'auto')
-  const autoCards = () => h.eventsOf('ai:card').filter((c) => (c as { kind: string }).kind === 'auto')
+  const autoCards = () =>
+    h.eventsOf('ai:card').filter((c) => (c as { kind: string }).kind === 'auto')
   return {
     ...h,
     ai,
@@ -258,9 +259,13 @@ describe('SessionManager: stop and post-call (live F2, platform F11, F12/F4, mai
     await h.session.whenPostCallIdle()
     const run = vi.spyOn(h.postCall, 'run')
     h.session.regenerate(sessionId, ['email'])
-    expect(run).toHaveBeenCalledWith(sessionId, expect.objectContaining({ id: 'builtin-general' }), {
-      parts: ['email'],
-    })
+    expect(run).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ id: 'builtin-general' }),
+      {
+        parts: ['email'],
+      },
+    )
     await h.session.whenPostCallIdle()
   })
 })

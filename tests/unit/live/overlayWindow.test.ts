@@ -113,7 +113,11 @@ import type { SettingsStore } from '@main/settings/settingsStore'
 import type { Env } from '@main/env'
 
 interface FakeWin {
-  webContents: { emit: (e: string, ...a: unknown[]) => void; reload: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn> }
+  webContents: {
+    emit: (e: string, ...a: unknown[]) => void
+    reload: ReturnType<typeof vi.fn>
+    focus: ReturnType<typeof vi.fn>
+  }
   bounds: Rect
   visible: boolean
   focused: boolean
@@ -135,7 +139,10 @@ function setup(opts: { expanded?: boolean; saved?: { x: number; y: number } } = 
   events.subscribe('overlay:visibility', (v) => visibility.push(v))
   const settings = {
     get: () => ({
-      overlay: { expanded: opts.expanded ?? false, positions: opts.saved ? { '1': opts.saved } : {} },
+      overlay: {
+        expanded: opts.expanded ?? false,
+        positions: opts.saved ? { '1': opts.saved } : {},
+      },
     }),
     update: vi.fn(),
   } as unknown as SettingsStore
