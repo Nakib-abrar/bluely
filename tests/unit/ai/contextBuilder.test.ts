@@ -78,6 +78,20 @@ describe('buildContext: system prompt', () => {
     expect(systemText(buildContext(input({ mode: INTERVIEW })))).toContain('Do NOT write a script')
     expect(systemText(buildContext(input()))).not.toContain('Do NOT write a script')
   })
+
+  it('applies the interview guardrail to a typed Ask with the screen attached', () => {
+    const ctx = buildContext(
+      input({
+        kind: 'ask',
+        mode: INTERVIEW,
+        question: 'Solve this for me',
+        screenshot: { dataUrl: 'data:image/jpeg;base64,AAAA' },
+      }),
+    )
+    expect(systemText(ctx)).toContain('Do NOT write a script')
+    expect(systemText(ctx)).toContain('not the full solution')
+    expect(userText(ctx)).toContain('My question: Solve this for me')
+  })
 })
 
 describe('buildContext: transcript', () => {
@@ -361,6 +375,46 @@ describe('buildContext: review kinds', () => {
     expect(text).toContain('## Transcript\n[00:00] Them: utterance at second 0.')
     expect(text.endsWith('My question: What did we agree on?')).toBe(true)
     expect(systemText(ctx)).toContain('## Task: Ask about this meeting')
+  })
+
+  it('meeting_chat sends earlier questions and answers as turns before the new question', () => {
+    const ctx = buildContext(
+      input({
+        kind: 'meeting_chat',
+        transcript: conversation(2),
+        nowMs: 120_000,
+        question: 'When is it due?',
+        chatHistory: [
+          { question: 'Who owns the pricing follow-up?', answer: 'Priya owns it [01:10].' },
+          { question: '  ', answer: 'dropped: no question' },
+        ],
+      }),
+    )
+    expect(ctx.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user'])
+    expect(ctx.messages[1]?.content).toBe('Who owns the pricing follow-up?')
+    expect(ctx.messages[2]?.content).toBe('Priya owns it [01:10].')
+    const last = ctx.messages[3]?.content as string
+    expect(last).toContain('## Transcript')
+    expect(last.endsWith('My question: When is it due?')).toBe(true)
+    expect(ctx.promptTokens).toBe(estimateMessagesTokens(ctx.messages))
+    // Live kinds never carry chat history.
+    expect(
+      buildContext(input({ chatHistory: [{ question: 'q', answer: 'a' }] })).messages,
+    ).toHaveLength(2)
+  })
+
+  it('meeting_chat drops the oldest earlier turns when nothing else can shrink', () => {
+    const history = [1, 2, 3].map((n) => ({
+      question: `Question ${n}?`,
+      answer: `Answer ${n} ${'word '.repeat(200)}`,
+    }))
+    const base = input({ kind: 'meeting_chat', question: 'And then?', chatHistory: history })
+    const full = buildContext(base)
+    expect(full.messages).toHaveLength(8)
+    const tight = buildContext({ ...base, maxPromptTokens: full.promptTokens - 100 })
+    expect(tight.truncated).toBe(true)
+    expect(tight.messages.map((m) => m.content)).not.toContain('Question 1?')
+    expect(tight.messages.map((m) => m.content)).toContain('Question 3?')
   })
 
   it('search_ask lists excerpts with titles and dates and drops the weakest when over budget', () => {

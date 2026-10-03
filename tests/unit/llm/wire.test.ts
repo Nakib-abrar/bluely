@@ -226,7 +226,7 @@ describe('wireModels', () => {
     expect(stats[0]?.samples).toBe(2)
     const latencyReq = mock.requests.filter((r) => r.path === '/chat/completions').at(-1)
     expect(latencyReq?.body).toMatchObject({
-      max_tokens: 5,
+      max_tokens: 64,
       temperature: 0,
       provider: { sort: 'latency', order: ['groq', 'cerebras'], allow_fallbacks: true },
     })

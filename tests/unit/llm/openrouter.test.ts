@@ -3,9 +3,11 @@ import {
   buildChatBody,
   computeSpeedStats,
   mapGenerationStats,
+  INCOMPLETE_STATS_DELAY_MS,
   OpenRouterLLM,
   toProviderPreferences,
   type ChatFinishedInfo,
+  type ChatIncompleteInfo,
 } from '@main/providers/llm/openrouter'
 import type { ChatRequest, ChatStreamEvent } from '@main/providers/llm/LLMProvider'
 import { ProviderError } from '@main/providers/errors'
@@ -35,6 +37,7 @@ function setup(
   opts: {
     now?: () => number
     onFinished?: (i: ChatFinishedInfo) => void
+    onIncomplete?: (i: ChatIncompleteInfo) => void
     idleTimeoutMs?: number
   } = {},
 ) {
@@ -48,6 +51,7 @@ function setup(
     sleep,
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.onFinished ? { onFinished: opts.onFinished } : {}),
+    ...(opts.onIncomplete ? { onIncomplete: opts.onIncomplete } : {}),
     ...(opts.idleTimeoutMs ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
   })
   return { llm, fetch, sleep, log, http }
@@ -109,6 +113,17 @@ describe('request building', () => {
     const body = buildChatBody({ ...REQ, responseFormat: 'text' })
     expect(Object.keys(body).sort()).toEqual(['messages', 'model', 'stream', 'usage'])
   })
+
+  it('sends the reasoning object only when the request has one', () => {
+    const body = buildChatBody({
+      ...REQ,
+      model: 'openai/gpt-oss-120b',
+      maxTokens: 1244,
+      reasoning: { effort: 'low', exclude: true },
+    })
+    expect(body).toMatchObject({ max_tokens: 1244, reasoning: { effort: 'low', exclude: true } })
+    expect(buildChatBody({ ...REQ, reasoning: {} })).not.toHaveProperty('reasoning')
+  })
 })
 
 describe('computeSpeedStats', () => {
@@ -134,6 +149,20 @@ describe('computeSpeedStats', () => {
     expect(s.tokensPerSec).toBeCloseTo(279 / 1.48, 1)
     expect(s.costUsd).toBe(0.0004)
     expect(s.model).toBe('req/model')
+  })
+
+  it('leaves reasoning tokens out of the answer throughput (they come before the first word)', () => {
+    const s = computeSpeedStats({
+      ...base,
+      firstTokenAt: 1700,
+      endedAt: 2000,
+      deltaCount: 30,
+      usage: { promptTokens: 10, completionTokens: 330, costUsd: 0.001, reasoningTokens: 300 },
+    })
+    // 30 answer tokens in 0.3 s, not 330 tokens (→ "1100 tok/s").
+    expect(s.tokensPerSec).toBe(100)
+    // Billing still counts every completion token.
+    expect(s.tokensOut).toBe(330)
   })
 
   it('falls back to the delta count without usage, and to null when undefined', () => {
@@ -235,6 +264,37 @@ describe('OpenRouterLLM.streamChat', () => {
     const done = events.at(-1) as Extract<ChatStreamEvent, { type: 'done' }>
     expect(done.stats.model).toBe('openai/gpt-4o-mini-2024-07-18')
     expect(done.usage).toBeNull()
+  })
+
+  it('reads reasoning token counts from usage details', async () => {
+    const { llm } = setup(() =>
+      sseResponse(
+        fakeStream([
+          deltaChunk('ok'),
+          chunk({
+            ...META,
+            choices: [],
+            usage: {
+              prompt_tokens: 9,
+              completion_tokens: 120,
+              cost: 0.0001,
+              completion_tokens_details: { reasoning_tokens: 118 },
+            },
+          }),
+          'data: [DONE]\n\n',
+        ]).stream,
+      ),
+    )
+    const done = (await collect(llm.streamChat(REQ))).at(-1) as Extract<
+      ChatStreamEvent,
+      { type: 'done' }
+    >
+    expect(done.usage).toEqual({
+      promptTokens: 9,
+      completionTokens: 120,
+      costUsd: 0.0001,
+      reasoningTokens: 118,
+    })
   })
 
   it('skips non-JSON data and still finishes when [DONE] is missing', async () => {
@@ -469,6 +529,75 @@ describe('OpenRouterLLM.streamChat', () => {
     expect(infos).toHaveLength(1)
     expect(infos[0]?.request.tag).toBe('auto')
     expect(infos[0]?.stats.costUsd).toBe(0.000012)
+  })
+})
+
+describe('OpenRouterLLM unfinished streams', () => {
+  const GEN = {
+    id: 'gen-123',
+    model: 'meta-llama/llama-3.3-70b-instruct',
+    provider_name: 'Groq',
+    tokens_prompt: 120,
+    tokens_completion: 40,
+    total_cost: 0.00009,
+  }
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 1))
+  }
+
+  it('looks up and reports the cost of a cancelled stream that OpenRouter already started', async () => {
+    const infos: ChatIncompleteInfo[] = []
+    const fs = fakeStream([deltaChunk('Hel')], { hang: true })
+    const { llm, fetch, sleep } = setup(
+      (url) =>
+        url.includes('/generation') ? jsonResponse(200, { data: GEN }) : sseResponse(fs.stream),
+      { onIncomplete: (i) => infos.push(i) },
+    )
+    const ac = new AbortController()
+    const it = llm.streamChat({ ...REQ, tag: 'auto', signal: ac.signal })[Symbol.asyncIterator]()
+    await it.next() // meta
+    await it.next() // delta
+    const pending = it.next()
+    ac.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' })
+    await until(() => infos.length > 0)
+    expect(sleep).toHaveBeenCalledWith(INCOMPLETE_STATS_DELAY_MS)
+    expect(fetch.calls[1]?.url).toBe(`${BASE}/generation?id=gen-123`)
+    expect(infos).toHaveLength(1)
+    expect(infos[0]).toMatchObject({
+      generationId: 'gen-123',
+      request: { tag: 'auto' },
+      stats: { costUsd: 0.00009, tokensIn: 120, tokensOut: 40, provider: 'Groq' },
+    })
+  })
+
+  it('also reports a stream that failed mid-way, but not a completed or never-started one', async () => {
+    const infos: ChatIncompleteInfo[] = []
+    const onIncomplete = (i: ChatIncompleteInfo) => infos.push(i)
+    const midway = setup(
+      (url) =>
+        url.includes('/generation')
+          ? jsonResponse(200, { data: GEN })
+          : sseResponse(
+              fakeStream([deltaChunk('Part'), chunk({ id: 'gen-123', error: { code: 502 } })])
+                .stream,
+            ),
+      { onIncomplete },
+    )
+    await expect(collect(midway.llm.streamChat(REQ))).rejects.toMatchObject({ code: 'server' })
+    await until(() => infos.length > 0)
+    expect(infos).toHaveLength(1)
+
+    const ok = setup(streamOf(['fine']), { onIncomplete })
+    await collect(ok.llm.streamChat(REQ))
+    const rejected = setup(() => jsonResponse(429, { error: { code: 429 } }), { onIncomplete })
+    await expect(collect(rejected.llm.streamChat(REQ))).rejects.toMatchObject({
+      code: 'rate_limit',
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(infos).toHaveLength(1)
+    expect(ok.fetch.calls).toHaveLength(1)
+    expect(rejected.fetch.calls).toHaveLength(1)
   })
 })
 

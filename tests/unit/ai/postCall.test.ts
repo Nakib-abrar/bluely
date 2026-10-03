@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  CHUNK_MAX_TOKENS,
+  PART_MAX_TOKENS,
   generatePostCall,
   parseActionItems,
   parseEmail,
@@ -117,6 +119,96 @@ describe('generatePostCall', () => {
     // Email uses the Mode's tone (Sales call = friendly) and signs with the profile name.
     expect(byPart['email']).toContain('warm, friendly')
     expect(byPart['email']).toContain('Sign off with my name: Ada.')
+  })
+
+  it('caps every request with max_tokens (none means the model’s full 64k output)', async () => {
+    const llm = happyLLM()
+    await generatePostCall({ llm }, input())
+    const caps = Object.fromEntries(llm.calls.map((r) => [partOf(r), r.maxTokens]))
+    expect(caps).toEqual({
+      notes: PART_MAX_TOKENS.notes,
+      actions: PART_MAX_TOKENS.actions,
+      email: PART_MAX_TOKENS.email,
+    })
+    for (const cap of Object.values(caps)) expect(cap).toBeLessThanOrEqual(4000)
+    // Claude does not think unless asked: no reasoning parameter, which would switch it on.
+    for (const req of llm.calls) expect(req.reasoning).toBeUndefined()
+  })
+
+  it('gives a reasoning Notes model headroom on top of the cap', async () => {
+    const llm = happyLLM()
+    await generatePostCall({ llm }, input({ model: 'google/gemini-2.5-pro' }))
+    for (const req of llm.calls) {
+      const cap = PART_MAX_TOKENS[partOf(req) as 'notes' | 'actions' | 'email']
+      expect(req.maxTokens).toBeGreaterThanOrEqual(cap * 2)
+      expect(req.reasoning).toEqual({ effort: 'medium', exclude: true })
+    }
+  })
+
+  it('generates only the requested parts', async () => {
+    const llm = happyLLM()
+    const res = await generatePostCall({ llm }, input({ parts: ['actions'] }))
+    expect(llm.calls.map(partOf)).toEqual(['actions'])
+    expect(res.notes).toBeNull()
+    expect(res.email).toBeNull()
+    expect(res.actionItems).toHaveLength(1)
+    // Parts that were not requested are not errors.
+    expect(res.errors).toEqual([])
+
+    const empty = await generatePostCall(
+      { llm },
+      input({ parts: ['notes', 'email'], transcriptText: ' ' }),
+    )
+    expect(empty.errors.map((e) => e.part)).toEqual(['notes', 'email'])
+  })
+
+  it('says when a reply was cut off at the length limit', async () => {
+    const llm = new FakeLLM((req) =>
+      partOf(req) === 'notes' ? '{"title": "Pricing", "summary": "We disc' : EMAIL_JSON,
+    )
+    llm.finishReason = (req) => (partOf(req) === 'notes' ? 'length' : 'stop')
+    const res = await generatePostCall({ llm, log: recordingLogger() }, input({ parts: ['notes'] }))
+    expect(res.errors).toEqual([{ part: 'notes', message: POST_CALL_MESSAGES.truncatedResponse }])
+  })
+
+  it('reads action items returned as a bare array or wrapped one level deep', async () => {
+    const bare = new FakeLLM(
+      () => '[{"text":"Send the deck","owner":"Me","due":"Friday"},{"text":"Book a demo"}]',
+    )
+    const res = await generatePostCall({ llm: bare }, input({ parts: ['actions'] }))
+    expect(res.errors).toEqual([])
+    expect(res.actionItems).toEqual([
+      { text: 'Send the deck', owner: 'Me', due: 'Friday' },
+      { text: 'Book a demo', owner: null, due: null },
+    ])
+
+    const wrapped = new FakeLLM(() => '{"result": {"items": [{"text": "Send the deck"}]}}')
+    const res2 = await generatePostCall({ llm: wrapped }, input({ parts: ['actions'] }))
+    expect(res2.actionItems).toEqual([{ text: 'Send the deck', owner: null, due: null }])
+  })
+
+  it('reports an unrecognizable action-items reply as unreadable, not as "no items"', async () => {
+    const llm = new FakeLLM(() => '{"summary": "We talked about pricing."}')
+    const res = await generatePostCall(
+      { llm, log: recordingLogger() },
+      input({ parts: ['actions'] }),
+    )
+    expect(res.actionItems).toBeNull()
+    expect(res.errors).toEqual([{ part: 'actions', message: POST_CALL_MESSAGES.invalidResponse }])
+  })
+
+  it('does not read notes sent in reply to the actions request as one action item', async () => {
+    // Used to parse as a single item "Pricing call" that replaced the session's items.
+    const llm = new FakeLLM(
+      () =>
+        '{"title":"Pricing call","summary":"We went over the new tiers.","keyPoints":["Tiers"],"decisions":[]}',
+    )
+    const res = await generatePostCall(
+      { llm, log: recordingLogger() },
+      input({ parts: ['actions'] }),
+    )
+    expect(res.actionItems).toBeNull()
+    expect(res.errors).toEqual([{ part: 'actions', message: POST_CALL_MESSAGES.invalidResponse }])
   })
 
   it('starts all three calls before any of them resolves', async () => {
@@ -271,6 +363,18 @@ describe('generatePostCall', () => {
     expect(res.notes?.title).toBe('Enterprise pricing and pilot')
   })
 
+  it('caps the chunk summaries too', async () => {
+    const huge = Array.from(
+      { length: 300 },
+      (_, i) => `[00:00] Me: ${'word '.repeat(40)}${i}`,
+    ).join('\n')
+    const llm = happyLLM()
+    await generatePostCall({ llm }, input({ transcriptText: huge, maxTranscriptTokens: 4000 }))
+    const chunks = llm.calls.filter((r) => partOf(r) === 'chunk')
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const req of chunks) expect(req.maxTokens).toBe(CHUNK_MAX_TOKENS)
+  })
+
   it('fails every part when a chunk summary fails', async () => {
     const huge = Array.from(
       { length: 300 },
@@ -336,12 +440,51 @@ describe('parsers', () => {
     ).toEqual(['a', '5', 'b'])
   })
 
-  it('parseActionItems treats missing lists as none and rejects non-objects', () => {
-    expect(parseActionItems({})).toEqual([])
+  it('parseActionItems: empty lists are none; no recognizable list is unreadable', () => {
     expect(parseActionItems({ items: [] })).toEqual([])
+    expect(parseActionItems({ items: null })).toEqual([])
+    expect(parseActionItems({ items: 'None' })).toEqual([])
+    expect(parseActionItems([])).toEqual([])
     expect(parseActionItems({ items: { text: 'Solo', owner: 'Unknown', due: 'TBD' } })).toEqual([
       { text: 'Solo', owner: null, due: null },
     ])
+    // A bare array (the first element used to be taken as the whole reply → zero items).
+    expect(parseActionItems([{ text: 'Send the deck', owner: 'Me', due: 'Friday' }])).toEqual([
+      { text: 'Send the deck', owner: 'Me', due: 'Friday' },
+    ])
+    // Wrapped one level deep, a single item instead of a list, or the object's only list.
+    expect(parseActionItems({ result: { items: ['Call Sam'] } })).toEqual([
+      { text: 'Call Sam', owner: null, due: null },
+    ])
+    expect(parseActionItems({ task: 'Call Sam', owner: 'Me' })).toEqual([
+      { text: 'Call Sam', owner: 'Me', due: null },
+    ])
+    expect(parseActionItems({ data: [{ text: 'Call Sam' }] })).toEqual([
+      { text: 'Call Sam', owner: null, due: null },
+    ])
+    expect(parseActionItems({ action: 'Book a demo', due: 'Friday' })).toEqual([
+      { text: 'Book a demo', owner: null, due: 'Friday' },
+    ])
+    // Nothing usable: null (an error) instead of [] (which would wipe the session's items).
+    expect(parseActionItems({})).toBeNull()
+    expect(parseActionItems({ summary: 'We talked.' })).toBeNull()
+    // Notes-shaped replies: 'title'/'description' alone don't make an item, and a list that sits
+    // next to other fields (keyPoints beside a summary) is not the action list.
+    expect(
+      parseActionItems({
+        title: 'Pricing call',
+        summary: 'We went over the new tiers.',
+        keyPoints: ['Tiers'],
+        decisions: [],
+      }),
+    ).toBeNull()
+    expect(
+      parseActionItems({ title: 'Pricing call', summary: 'x', keyPoints: ['Tiers'] }),
+    ).toBeNull()
+    expect(parseActionItems({ title: 'Pricing call', description: 'Tiers' })).toBeNull()
+    expect(parseActionItems({ text: 'Call Sam', subtasks: ['Find number'] })).toBeNull()
+    expect(parseActionItems({ items: [{ foo: 'bar' }, 'Call Sam'] })).toHaveLength(1)
+    expect(parseActionItems({ items: [{ foo: 'bar' }] })).toBeNull()
     expect(parseActionItems(null)).toBeNull()
   })
 

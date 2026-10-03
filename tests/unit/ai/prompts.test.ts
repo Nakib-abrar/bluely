@@ -165,8 +165,8 @@ describe('actionInstruction', () => {
     expect(actionInstruction('meeting_chat', GENERAL)).toMatch(/past meeting/)
   })
 
-  it('interview guardrail replaces say/auto/assist only in builtin-interview', () => {
-    for (const kind of ['say', 'auto', 'assist'] as const) {
+  it('interview guardrail replaces say/auto/assist/ask only in builtin-interview', () => {
+    for (const kind of ['say', 'auto', 'assist', 'ask'] as const) {
       const coached = actionInstruction(kind, INTERVIEW)
       expect(coached).toContain(GUARDRAIL)
       expect(coached).toContain('STAR')
@@ -176,10 +176,21 @@ describe('actionInstruction', () => {
       expect(actionInstruction(kind, { modeId: 'custom-123' })).not.toContain(GUARDRAIL)
     }
     // Other actions are unchanged in interview mode.
-    for (const kind of ['followups', 'factcheck', 'who', 'recap', 'ask'] as const) {
+    for (const kind of ['followups', 'factcheck', 'who', 'recap'] as const) {
       expect(actionInstruction(kind, INTERVIEW)).toBe(actionInstruction(kind, GENERAL))
       expect(actionInstruction(kind, INTERVIEW)).not.toContain(GUARDRAIL)
     }
+  })
+
+  it('interview mode: a typed Ask is coached too, and never gets a full solution for the screen', () => {
+    const ask = actionInstruction('ask', INTERVIEW)
+    // The plain Ask instruction ("Be direct") would conflict with the coaching rule.
+    expect(ask).not.toContain('Be direct')
+    expect(ask).toMatch(/typed question/)
+    expect(ask).toMatch(/give me an answer to/)
+    expect(ask).toContain('hints and an approach, not the full solution')
+    expect(actionInstruction('assist', INTERVIEW)).toContain('not the full solution')
+    expect(actionInstruction('say', INTERVIEW)).not.toContain('not the full solution')
   })
 })
 

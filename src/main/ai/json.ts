@@ -12,10 +12,10 @@ const MAX_CANDIDATES = 32
 const FENCE_RE = /```[ \t]*(?:json5?|JSON)?[ \t]*\r?\n?([\s\S]*?)```/g
 
 /**
- * Returns the end index (inclusive) of the balanced `{…}` starting at `start`, or -1.
- * Braces inside JSON strings (including escaped quotes) are ignored.
+ * Returns the end index (inclusive) of the balanced `{…}` (or `[…]`) starting at `start`, or -1.
+ * Brackets inside JSON strings (including escaped quotes) are ignored.
  */
-function findBalancedEnd(text: string, start: number): number {
+function findBalancedEnd(text: string, start: number, open = '{', close = '}'): number {
   let depth = 0
   let inString = false
   for (let i = start; i < text.length; i++) {
@@ -26,8 +26,8 @@ function findBalancedEnd(text: string, start: number): number {
       continue
     }
     if (ch === '"') inString = true
-    else if (ch === '{') depth++
-    else if (ch === '}') {
+    else if (ch === open) depth++
+    else if (ch === close) {
       depth--
       if (depth === 0) return i
     }
@@ -79,6 +79,18 @@ function tryParseObject(candidate: string): Record<string, unknown> | null {
   return null
 }
 
+function tryParseArray(candidate: string): unknown[] | null {
+  for (const attempt of [candidate, stripTrailingCommas(candidate)]) {
+    try {
+      const value: unknown = JSON.parse(attempt)
+      return Array.isArray(value) ? value : null
+    } catch {
+      // Try the trailing-comma repair, then give up.
+    }
+  }
+  return null
+}
+
 function scan(text: string): Record<string, unknown> | null {
   let from = 0
   for (let n = 0; n < MAX_CANDIDATES; n++) {
@@ -99,18 +111,43 @@ function scan(text: string): Record<string, unknown> | null {
   return null
 }
 
-/**
- * Extracts the first JSON object from model output: prefers fenced blocks, then the outermost
- * balanced `{…}` (string/escape aware), tolerating trailing commas. Returns null when none parses.
- */
-export function extractJsonObject(text: string | null | undefined): unknown | null {
+/** A top-level array that starts before any object (e.g. `[{…}, {…}]`), else null. */
+function scanArray(text: string): unknown[] | null {
+  const start = text.indexOf('[')
+  if (start < 0) return null
+  const firstObject = text.indexOf('{')
+  if (firstObject >= 0 && firstObject < start) return null
+  const end = findBalancedEnd(text, start, '[', ']')
+  return end < 0 ? null : tryParseArray(text.slice(start, end + 1))
+}
+
+function extract(
+  text: string | null | undefined,
+  scanOne: (text: string) => unknown,
+): unknown | null {
   if (typeof text !== 'string') return null
   // trim() also strips a leading byte-order mark (U+FEFF counts as whitespace).
   const trimmed = text.trim()
   if (!trimmed) return null
   for (const match of trimmed.matchAll(FENCE_RE)) {
-    const found = scan(match[1] ?? '')
+    const found = scanOne(match[1] ?? '')
     if (found) return found
   }
-  return scan(trimmed)
+  return scanOne(trimmed)
+}
+
+/**
+ * Extracts the first JSON object from model output: prefers fenced blocks, then the outermost
+ * balanced `{…}` (string/escape aware), tolerating trailing commas. Returns null when none parses.
+ */
+export function extractJsonObject(text: string | null | undefined): unknown | null {
+  return extract(text, scan)
+}
+
+/**
+ * Like extractJsonObject, but also returns a top-level JSON array when the output is one (e.g. a
+ * bare list of action items instead of `{"items": [...]}`), rather than its first element.
+ */
+export function extractJsonValue(text: string | null | undefined): unknown | null {
+  return extract(text, (t) => scanArray(t) ?? scan(t))
 }

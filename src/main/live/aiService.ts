@@ -8,6 +8,7 @@ import type {
   LiveRequestKind,
   Mode,
   ModelRole,
+  ProviderErrorCode,
   SpeedStats,
   Tier,
   TranscriptLine,
@@ -17,9 +18,10 @@ import { AppError } from '../errors'
 import type { CoreContext } from '../context'
 import type { ChatMessage, ProviderRouting } from '../providers/llm/LLMProvider'
 import { ProviderError } from '../providers/errors'
-import { buildContext, retrievalQueryFrom } from '../ai/contextBuilder'
+import { buildContext, retrievalQueryFrom, type ChatTurn } from '../ai/contextBuilder'
 import { renderNotesMarkdown } from '../ai/markdown'
 import { messagesToText } from '../ai/tokens'
+import { answerBudget } from '../providers/llm/reasoning'
 import type { ModelsFeature } from '../models/wire'
 import { routingFor } from '../models/wire'
 import type { ModesFeature } from '../modes/wire'
@@ -71,13 +73,19 @@ const FAST_KINDS: ReadonlySet<LiveRequestKind> = new Set([
   'recap',
 ])
 
+/**
+ * Answer caps. The prompts' word limits keep answers short; these caps only stop runaways, and
+ * must leave room for those limits in Bangla too, which costs several times more tokens per word
+ * than English (two 45-word replies can take ~500 tokens). Reasoning models get extra headroom on
+ * top (answerBudget).
+ */
 const MAX_TOKENS: Record<string, number> = {
-  auto: 220,
-  say: 220,
-  followups: 220,
-  factcheck: 600,
-  who: 450,
-  recap: 400,
+  auto: 450,
+  say: 450,
+  followups: 400,
+  factcheck: 800,
+  who: 700,
+  recap: 700,
   assist: 700,
   ask: 800,
   meeting_chat: 900,
@@ -85,6 +93,25 @@ const MAX_TOKENS: Record<string, number> = {
 }
 
 const MAX_LIVE_CARDS = 100
+
+/** Earlier Q&A turns sent with a meeting-chat question so follow-ups keep their context. */
+const MEETING_CHAT_HISTORY_TURNS = 4
+/** Long earlier answers are shortened to this many characters in that history. */
+const MEETING_CHAT_HISTORY_ANSWER_CHARS = 2_000
+/** Meeting-chat prompt budget without a known context length, and its ceiling. */
+const MEETING_CHAT_DEFAULT_PROMPT_TOKENS = 24_000
+const MEETING_CHAT_MAX_PROMPT_TOKENS = 100_000
+/** Context window kept free for the system prompt, the answer and estimate error. */
+const MEETING_CHAT_RESERVED_TOKENS = 4_096
+
+/** Failures retried once automatically when no text has arrived yet (like LLMProvider.complete). */
+const RETRY_ONCE: ReadonlySet<ProviderErrorCode> = new Set<ProviderErrorCode>([
+  'rate_limit',
+  'server',
+  'network',
+])
+const MAX_RETRY_DELAY_MS = 5_000
+const DEFAULT_RETRY_DELAY_MS = 1_000
 
 /**
  * Runs every AI request (live actions, Ask/Assist, auto-suggest, meeting chat, ask-across-
@@ -227,7 +254,9 @@ export class AiService {
         nowMs: this.live?.elapsedMs() ?? 0,
         contextMinutes: settings.advanced.contextMinutes,
         runningSummary: summary.text,
-        summaryCoveredUntilMs: summary.text ? summary.coveredUntilMs : null,
+        // Always passed: without a summary (none yet, or the summarizer keeps failing) the
+        // builder then keeps the older lines verbatim instead of silently dropping them.
+        summaryCoveredUntilMs: summary.coveredUntilMs,
         knowledge,
         question,
         screenshot: screenshot ? { dataUrl: screenshot.dataUrl } : null,
@@ -313,7 +342,8 @@ export class AiService {
       runningSummary: null,
       question,
       notesMarkdown: detail.notes ? renderNotesMarkdown(detail.notes) : null,
-      maxPromptTokens: 24_000,
+      chatHistory: this.meetingChatHistory(sessionId),
+      maxPromptTokens: meetingChatBudget(this.models.catalog.getById(model)?.contextLength),
     })
     void this.stream(
       {
@@ -428,6 +458,21 @@ export class AiService {
     )
   }
 
+  /** The last few answered questions of a meeting's chat, oldest first. */
+  private meetingChatHistory(sessionId: string): ChatTurn[] {
+    return this.history.aiMessages
+      .chatHistory(sessionId)
+      .filter((c) => c.status === 'done' && !!c.question?.trim() && !!c.text.trim())
+      .slice(-MEETING_CHAT_HISTORY_TURNS)
+      .map((c) => ({
+        question: c.question ?? '',
+        answer:
+          c.text.length > MEETING_CHAT_HISTORY_ANSWER_CHARS
+            ? `${c.text.slice(0, MEETING_CHAT_HISTORY_ANSWER_CHARS - 1)}…`
+            : c.text,
+      }))
+  }
+
   private safeRetrieve(modeId: string, query: string) {
     try {
       // Chunks are up to ~800 tokens each; 4 keeps live prompts small and fast.
@@ -442,39 +487,79 @@ export class AiService {
     const { card } = job
     const { events } = this.ctx
     if (!this.inflight.has(card.id)) this.inflight.set(card.id, { controller, scope: card.scope })
-    this.history.aiMessages.insert({
-      id: card.id,
-      sessionId: card.sessionId,
-      kind: job.persistKind,
-      label: card.label,
-      promptText: messagesToText(job.messages),
-      status: 'streaming',
-      createdAt: card.createdAt,
-      usedScreen: card.usedScreen,
-    })
+    if (isPersisted(card)) {
+      this.history.aiMessages.insert({
+        id: card.id,
+        sessionId: card.sessionId,
+        kind: job.persistKind,
+        label: card.label,
+        promptText: messagesToText(job.messages),
+        status: 'streaming',
+        createdAt: card.createdAt,
+        usedScreen: card.usedScreen,
+      })
+    }
+    // Reasoning models get low effort and headroom so thinking can't use up the answer's cap.
+    const budget = answerBudget(job.model, job.maxTokens)
     let text = ''
     let stats: SpeedStats | null = null
+    let finishReason: string | null = null
     try {
-      if (job.trace) job.trace.requestSentAt = Date.now()
-      for await (const ev of this.models.llm.streamChat({
-        model: job.model,
-        messages: job.messages,
-        routing: job.routing,
-        maxTokens: job.maxTokens,
-        temperature: job.temperature,
-        signal: controller.signal,
-        tag: job.persistKind,
-      })) {
-        if (ev.type === 'delta') {
-          if (!text && job.trace) job.trace.firstTokenAt = Date.now()
-          text += ev.text
-          card.text = text
-          this.coalescer.push(card.id, ev.text)
-        } else if (ev.type === 'done') {
-          stats = ev.stats
+      for (let attempt = 0; ; attempt++) {
+        try {
+          if (job.trace) job.trace.requestSentAt = Date.now()
+          for await (const ev of this.models.llm.streamChat({
+            model: job.model,
+            messages: job.messages,
+            routing: job.routing,
+            maxTokens: budget.maxTokens,
+            ...(budget.reasoning ? { reasoning: budget.reasoning } : {}),
+            temperature: job.temperature,
+            signal: controller.signal,
+            tag: job.persistKind,
+          })) {
+            if (ev.type === 'delta') {
+              if (!text && job.trace) job.trace.firstTokenAt = Date.now()
+              text += ev.text
+              card.text = text
+              this.coalescer.push(card.id, ev.text)
+            } else if (ev.type === 'done') {
+              stats = ev.stats
+              finishReason = ev.finishReason
+            }
+          }
+          break
+        } catch (err) {
+          // A rate limit or a provider hiccup before the first word: retry once on our own
+          // (honouring Retry-After, capped) instead of leaving a failed card to click.
+          const retry =
+            attempt === 0 &&
+            !text &&
+            !controller.signal.aborted &&
+            err instanceof ProviderError &&
+            RETRY_ONCE.has(err.code)
+          if (!retry) throw err
+          const delayMs =
+            err.retryAfterSec != null
+              ? Math.min(err.retryAfterSec * 1000, MAX_RETRY_DELAY_MS)
+              : DEFAULT_RETRY_DELAY_MS
+          this.ctx.log.info(`AI request ${card.kind}: retrying after ${err.code} in ${delayMs} ms`)
+          await sleepUnlessAborted(delayMs, controller.signal)
         }
       }
       this.coalescer.flush(card.id)
+      if (!text.trim()) {
+        // Nothing to show is a failure, not a blank "done" card (e.g. a reasoning model that
+        // spent its whole budget thinking).
+        throw new ProviderError('server', {
+          message: t(finishReason === 'length' ? 'models.answerBudgetUsed' : 'models.answerEmpty'),
+          detail: `empty answer (finish_reason: ${finishReason ?? 'none'})`,
+        })
+      }
+      // Cut off at the token cap: end on '…' so nobody reads half a sentence out as a full
+      // answer. Only the ellipsis, no explanatory prose: this text is what gets stored, copied
+      // and sent back to the model as an earlier meeting-chat turn.
+      if (finishReason === 'length') text = `${text.trimEnd()}…`
       card.status = 'done'
       card.text = text
       card.stats = stats
@@ -483,18 +568,20 @@ export class AiService {
         job.trace.doneAt = Date.now()
         events.broadcast('dev:latency', { ...job.trace, model: stats?.model ?? job.model })
       }
-      this.history.aiMessages.complete(card.id, {
-        responseText: text,
-        model: stats?.model ?? job.model,
-        provider: stats?.provider ?? null,
-        ttftMs: stats?.ttftMs ?? null,
-        totalMs: stats?.totalMs ?? null,
-        tokensIn: stats?.tokensIn ?? null,
-        tokensOut: stats?.tokensOut ?? null,
-        costUsd: stats?.costUsd ?? null,
-        status: 'done',
-        error: null,
-      })
+      if (isPersisted(card)) {
+        this.history.aiMessages.complete(card.id, {
+          responseText: text,
+          model: stats?.model ?? job.model,
+          provider: stats?.provider ?? null,
+          ttftMs: stats?.ttftMs ?? null,
+          totalMs: stats?.totalMs ?? null,
+          tokensIn: stats?.tokensIn ?? null,
+          tokensOut: stats?.tokensOut ?? null,
+          costUsd: stats?.costUsd ?? null,
+          status: 'done',
+          error: null,
+        })
+      }
       if (stats?.generationId) void this.refineStats(card, stats)
     } catch (err) {
       this.coalescer.flush(card.id)
@@ -532,6 +619,7 @@ export class AiService {
   private finishCancelled(card: AiCard): void {
     card.status = 'cancelled'
     this.ctx.events.broadcast('ai:cancelled', { id: card.id })
+    if (!isPersisted(card)) return
     try {
       this.history.aiMessages.complete(card.id, {
         responseText: card.text,
@@ -569,6 +657,7 @@ export class AiService {
       `AI request ${card.kind} failed: ${info.code}`,
       err instanceof ProviderError ? err.detail : err,
     )
+    if (!isPersisted(card)) return
     try {
       this.history.aiMessages.complete(card.id, {
         responseText: card.text || null,
@@ -586,6 +675,45 @@ export class AiService {
       /* row may not exist yet */
     }
   }
+}
+
+/**
+ * Ask-across-meetings answers are kept in memory only (the search panel's card list). Their
+ * prompts quote transcripts of other meetings, and a row with no session would outlive those
+ * meetings when they are deleted. Their cost is still logged by the models feature.
+ */
+function isPersisted(card: AiCard): boolean {
+  return card.scope !== 'search'
+}
+
+/**
+ * Meeting chat reads a whole meeting, so a long one should not lose its opening on a model with
+ * a large context window: use half the window (capped), but never less than the default budget
+ * when the window has room for it.
+ */
+export function meetingChatBudget(contextLength: number | null | undefined): number {
+  if (!contextLength || contextLength <= 0) return MEETING_CHAT_DEFAULT_PROMPT_TOKENS
+  const fits = Math.max(0, contextLength - MEETING_CHAT_RESERVED_TOKENS)
+  const half = Math.floor(contextLength / 2)
+  return Math.min(
+    MEETING_CHAT_MAX_PROMPT_TOKENS,
+    Math.max(half, Math.min(MEETING_CHAT_DEFAULT_PROMPT_TOKENS, fits)),
+  )
+}
+
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new ProviderError('aborted'))
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new ProviderError('aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function labelFor(kind: LiveRequestKind, question: string | null): string {

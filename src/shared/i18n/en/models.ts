@@ -19,4 +19,10 @@ export const models = {
   latencyBusy: 'A latency test is already running.',
   latencyCancelled: 'Latency test cancelled.',
   latencyNoModels: 'Pick at least one model to test.',
+  answerEmpty:
+    'The model returned an empty answer. Try again, or pick another model in Settings › AI Models.',
+  answerBudgetUsed:
+    'The model used its whole token limit before answering (reasoning models think first). Try again, or pick another model in Settings › AI Models.',
+  latencyNoAnswer:
+    'The model returned no answer text within the token limit (reasoning models can use it all up).',
 } as const

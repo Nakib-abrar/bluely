@@ -10,7 +10,8 @@ import type {
   LLMProvider,
   ProviderRouting,
 } from '../providers/llm/LLMProvider'
-import { extractJsonObject } from './json'
+import { answerBudget } from '../providers/llm/reasoning'
+import { extractJsonObject, extractJsonValue } from './json'
 import { POST_CALL_MESSAGES } from './labels'
 import {
   postActionsPrompt,
@@ -48,7 +49,10 @@ export interface PostCallResult {
   notes: MeetingNotes | null
   actionItems: PostCallActionItem[] | null
   email: FollowUpEmail | null
-  /** One entry per part that failed; the other parts are still usable. */
+  /**
+   * One entry per requested part that failed; the other parts are still usable. A part that was
+   * not requested (see PostCallInput.parts) is null without an error.
+   */
   errors: { part: PostCallPart; message: string }[]
   /** One entry per part whose model call completed (even if its JSON was unusable). */
   stats: PostCallPartStats[]
@@ -67,6 +71,8 @@ export interface PostCallInput {
   signal?: AbortSignal
   /** Above this estimate the transcript is condensed in chunks first. Default 60000. */
   maxTranscriptTokens?: number
+  /** Which parts to generate (default: all three). Used to regenerate only what is missing. */
+  parts?: readonly PostCallPart[]
 }
 
 export interface PostCallDeps {
@@ -75,7 +81,20 @@ export interface PostCallDeps {
 }
 
 export const DEFAULT_MAX_TRANSCRIPT_TOKENS = 60_000
-const PARTS: readonly PostCallPart[] = ['notes', 'actions', 'email']
+export const POST_CALL_PARTS: readonly PostCallPart[] = ['notes', 'actions', 'email']
+/**
+ * Output caps (max_tokens). Without one OpenRouter reserves the model's whole output length
+ * (64k tokens for Claude Sonnet 4.5) per request, so low-credit accounts get 402 on all three
+ * parts and a runaway answer is billed in full. The prompts' word limits fit easily, in Bangla
+ * too (which costs several times more tokens per word than English).
+ */
+export const PART_MAX_TOKENS: Readonly<Record<PostCallPart, number>> = {
+  notes: 3_000,
+  actions: 2_000,
+  email: 2_000,
+}
+/** Output cap for one map-reduce chunk summary (≤ 350 words). */
+export const CHUNK_MAX_TOKENS = 3_000
 const CHUNK_CONCURRENCY = 3
 /** Condense rounds before giving up on shrinking further (one round is plenty in practice). */
 const MAX_REDUCE_ROUNDS = 3
@@ -195,12 +214,14 @@ const notesSchema = z.preprocess(
   z.object({ title: zText, summary: zText, keyPoints: zTextList, decisions: zTextList }),
 )
 
+const ACTION_TEXT_KEYS = ['text', 'task', 'action', 'item', 'title', 'description'] as const
+
 const actionItemSchema = z.preprocess(
   (raw) => {
     if (typeof raw === 'string') return { text: stripBullet(raw), owner: null, due: null }
     if (!isRecord(raw)) return raw
     return {
-      text: pick(raw, ['text', 'task', 'action', 'item', 'title', 'description']),
+      text: pick(raw, ACTION_TEXT_KEYS),
       owner: pick(raw, ['owner', 'assignee', 'assignedTo', 'who', 'responsible']),
       due: pick(raw, ['due', 'dueDate', 'deadline', 'when', 'by']),
     }
@@ -209,6 +230,12 @@ const actionItemSchema = z.preprocess(
 )
 
 const ACTION_LIST_KEYS = ['items', 'actionItems', 'actions', 'tasks', 'todos'] as const
+/**
+ * Keys that make a lone object an action item. Narrower than ACTION_TEXT_KEYS: 'title' and
+ * 'description' also head notes-shaped replies ({"title", "summary", "keyPoints"}), which must
+ * not be read as one item called after the meeting.
+ */
+const ACTION_ITEM_KEYS = ['text', 'task', 'action'] as const
 
 const EMAIL_KEYS = {
   subject: ['subject', 'subjectLine', 'title'],
@@ -255,11 +282,38 @@ export function parseNotes(raw: unknown): MeetingNotes | null {
   return { title, summary, keyPoints, decisions }
 }
 
-/** Validates and coerces the action items JSON; [] when the meeting had none. */
-export function parseActionItems(raw: unknown): PostCallActionItem[] | null {
+/**
+ * The list of raw action items in a reply, or null when the reply has no recognizable list.
+ * Accepts `{"items": [...]}` (and aliases, also wrapped one level deep), a bare `[...]`, a single
+ * item (`{"text"|"task"|"action": ..., "owner", "due"}` with no lists in it), or an object that
+ * holds nothing but one list under another key. Anything else (e.g. notes sent in reply to the
+ * actions request) is unreadable rather than guessed at: a wrong guess would replace the
+ * session's action items and their ticks.
+ */
+function actionList(raw: unknown): unknown[] | null {
+  if (Array.isArray(raw)) return raw
   if (!isRecord(raw)) return null
-  const list = pick(raw, ACTION_LIST_KEYS)
-  const rawItems = list == null ? [] : Array.isArray(list) ? list : [list]
+  const obj = unwrap(raw, ACTION_LIST_KEYS)
+  const list = pick(obj, ACTION_LIST_KEYS)
+  if (list !== undefined) {
+    if (list == null) return []
+    if (typeof list === 'string' && NULLISH_VALUES.has(list.trim().toLowerCase())) return []
+    return Array.isArray(list) ? list : [list]
+  }
+  const values = Object.values(obj)
+  const arrays = values.filter((v): v is unknown[] => Array.isArray(v))
+  if (arrays.length === 0) return pick(obj, ACTION_ITEM_KEYS) !== undefined ? [obj] : null
+  return arrays.length === 1 && values.length === 1 ? (arrays[0] ?? null) : null
+}
+
+/**
+ * Validates and coerces the action items JSON; [] when the meeting had none. Null (unreadable)
+ * when there is no list, or a list none of whose items is usable: an empty success would wipe
+ * the session's existing action items.
+ */
+export function parseActionItems(raw: unknown): PostCallActionItem[] | null {
+  const rawItems = actionList(raw)
+  if (rawItems === null) return null
   const seen = new Set<string>()
   const items: PostCallActionItem[] = []
   for (const rawItem of rawItems) {
@@ -270,7 +324,7 @@ export function parseActionItems(raw: unknown): PostCallActionItem[] | null {
     seen.add(key)
     items.push(parsed.data)
   }
-  return items
+  return rawItems.length > 0 && items.length === 0 ? null : items
 }
 
 /** Validates and coerces the email JSON; null when there is no body. */
@@ -339,12 +393,16 @@ async function runPart<T>(
 ): Promise<PartOutcome<T>> {
   const messages = partMessages(part, input, body, condensed)
   const promptText = messagesToText(messages)
+  // Notes quality benefits from some reasoning, so models that think get medium effort.
+  const budget = answerBudget(input.model, PART_MAX_TOKENS[part], 'medium')
   let stats: PostCallPartStats | null = null
   try {
     const res = await deps.llm.complete({
       model: input.model,
       routing: input.routing,
       messages,
+      maxTokens: budget.maxTokens,
+      ...(budget.reasoning ? { reasoning: budget.reasoning } : {}),
       temperature: 0.2,
       responseFormat: 'json_object',
       signal: input.signal,
@@ -352,10 +410,20 @@ async function runPart<T>(
     })
     stats = { part, stats: res.stats, usage: res.usage, promptText, responseText: res.text }
     if (!res.text.trim()) return { ok: false, message: POST_CALL_MESSAGES.emptyResponse, stats }
-    const value = parse(extractJsonObject(res.text))
+    // Action items may come back as a bare array; notes and email are always objects.
+    const raw = part === 'actions' ? extractJsonValue(res.text) : extractJsonObject(res.text)
+    const value = parse(raw)
     if (value === null) {
-      deps.log?.warn(`post-call ${part}: unusable JSON`, { preview: res.text.slice(0, 200) })
-      return { ok: false, message: POST_CALL_MESSAGES.invalidResponse, stats }
+      deps.log?.warn(`post-call ${part}: unusable JSON`, {
+        preview: res.text.slice(0, 200),
+        finishReason: res.finishReason,
+      })
+      const cutOff = res.finishReason === 'length'
+      return {
+        ok: false,
+        message: cutOff ? POST_CALL_MESSAGES.truncatedResponse : POST_CALL_MESSAGES.invalidResponse,
+        stats,
+      }
     }
     return { ok: true, value, stats }
   } catch (err) {
@@ -446,10 +514,13 @@ async function condense(
           content: `## Transcript (part ${i + 1} of ${chunks.length})\n${chunk}`,
         },
       ]
+      const budget = answerBudget(input.model, CHUNK_MAX_TOKENS, 'medium')
       const res = await deps.llm.complete({
         model: input.model,
         routing: input.routing,
         messages,
+        maxTokens: budget.maxTokens,
+        ...(budget.reasoning ? { reasoning: budget.reasoning } : {}),
         temperature: 0.2,
         signal: input.signal,
         tag: 'post_chunk',
@@ -471,12 +542,16 @@ async function condense(
 
 // ───────────────────────────── entry point ─────────────────────────────
 
-function allFailed(message: string, base: Partial<PostCallResult> = {}): PostCallResult {
+function allFailed(
+  parts: readonly PostCallPart[],
+  message: string,
+  base: Partial<PostCallResult> = {},
+): PostCallResult {
   return {
     notes: null,
     actionItems: null,
     email: null,
-    errors: PARTS.map((part) => ({ part, message })),
+    errors: parts.map((part) => ({ part, message })),
     stats: [],
     mapReduce: null,
     ...base,
@@ -485,16 +560,17 @@ function allFailed(message: string, base: Partial<PostCallResult> = {}): PostCal
 
 /**
  * Generates meeting notes, action items and a follow-up email with three parallel JSON requests
- * to the Notes model. Each part succeeds or fails on its own; never throws. Transcripts above
- * `maxTranscriptTokens` are first condensed chunk by chunk (map) and the three prompts then run
- * on the joined chunk notes (reduce).
+ * to the Notes model (or only `input.parts`). Each part succeeds or fails on its own; never
+ * throws. Transcripts above `maxTranscriptTokens` are first condensed chunk by chunk (map) and the
+ * prompts then run on the joined chunk notes (reduce).
  */
 export async function generatePostCall(
   deps: PostCallDeps,
   input: PostCallInput,
 ): Promise<PostCallResult> {
+  const parts = POST_CALL_PARTS.filter((p) => !input.parts?.length || input.parts.includes(p))
   const transcript = input.transcriptText.trim()
-  if (!transcript) return allFailed(POST_CALL_MESSAGES.noTranscript)
+  if (!transcript) return allFailed(parts, POST_CALL_MESSAGES.noTranscript)
 
   const maxTokens = Math.max(1000, input.maxTranscriptTokens ?? DEFAULT_MAX_TRANSCRIPT_TOKENS)
   let body = transcript
@@ -509,22 +585,23 @@ export async function generatePostCall(
       deps.log?.warn('post-call: condensing the long transcript failed', err)
       const message = `${POST_CALL_MESSAGES.longTranscriptFailed} ${errorMessage(err)}`
       const chunks = splitTranscript(transcript, maxTokens).length
-      return allFailed(message, { mapReduce: { chunks, stats: chunkStats } })
+      return allFailed(parts, message, { mapReduce: { chunks, stats: chunkStats } })
     }
   }
 
   const condensed = mapReduce !== null
-  // The three requests run in parallel; total time is the slowest one, not the sum.
+  const wanted = (part: PostCallPart) => parts.includes(part)
+  // The requests run in parallel; total time is the slowest one, not the sum.
   const [notes, actions, email] = await Promise.all([
-    runPart(deps, input, 'notes', body, condensed, parseNotes),
-    runPart(deps, input, 'actions', body, condensed, parseActionItems),
-    runPart(deps, input, 'email', body, condensed, parseEmail),
+    wanted('notes') ? runPart(deps, input, 'notes', body, condensed, parseNotes) : null,
+    wanted('actions') ? runPart(deps, input, 'actions', body, condensed, parseActionItems) : null,
+    wanted('email') ? runPart(deps, input, 'email', body, condensed, parseEmail) : null,
   ])
 
   const result: PostCallResult = {
-    notes: notes.ok ? notes.value : null,
-    actionItems: actions.ok ? actions.value : null,
-    email: email.ok ? email.value : null,
+    notes: notes?.ok ? notes.value : null,
+    actionItems: actions?.ok ? actions.value : null,
+    email: email?.ok ? email.value : null,
     errors: [],
     stats: [],
     mapReduce,
@@ -534,6 +611,7 @@ export async function generatePostCall(
     ['actions', actions],
     ['email', email],
   ] as const) {
+    if (!outcome) continue
     if (outcome.stats) result.stats.push(outcome.stats)
     if (!outcome.ok) result.errors.push({ part, message: outcome.message })
   }

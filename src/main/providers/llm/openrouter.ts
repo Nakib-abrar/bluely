@@ -22,6 +22,11 @@ const MAX_RETRY_DELAY_MS = 5_000
 const DEFAULT_RETRY_DELAY_MS = 1_000
 /** /generation stats appear shortly after the stream ends; one retry after this delay. */
 const GENERATION_RETRY_DELAY_MS = 800
+/**
+ * A cancelled or failed generation is finalized (and billed) by OpenRouter a moment after we
+ * hang up, so its cost is looked up after this delay.
+ */
+export const INCOMPLETE_STATS_DELAY_MS = 3_000
 
 /** Information passed to `onFinished` after every successfully completed stream. */
 export interface ChatFinishedInfo {
@@ -29,6 +34,17 @@ export interface ChatFinishedInfo {
   stats: SpeedStats
   usage: ChatUsage | null
   finishReason: string | null
+}
+
+/**
+ * Information passed to `onIncomplete` for a stream that ended early (cancelled, superseded or
+ * failed mid-stream) after OpenRouter had started the generation. Tokens generated until then
+ * are still billed; `stats` is what GET /generation reported for it.
+ */
+export interface ChatIncompleteInfo {
+  request: ChatRequest
+  generationId: string
+  stats: Partial<SpeedStats>
 }
 
 export interface OpenRouterLLMOptions {
@@ -46,6 +62,11 @@ export interface OpenRouterLLMOptions {
    * to log usage/cost and feed the rolling latency stats. Exceptions are swallowed.
    */
   onFinished?: (info: ChatFinishedInfo) => void
+  /**
+   * Called (a few seconds later, best effort) for a stream that ended without finishing but was
+   * already billed, e.g. to log its cost for the monthly spend. Exceptions are swallowed.
+   */
+  onIncomplete?: (info: ChatIncompleteInfo) => void
 }
 
 /** The OpenRouter `provider` routing object. Empty `order` is omitted. Never adds ":nitro". */
@@ -75,6 +96,12 @@ export function buildChatBody(req: ChatRequest): Record<string, unknown> {
   if (req.temperature !== undefined) body['temperature'] = req.temperature
   if (req.responseFormat === 'json_object') body['response_format'] = { type: 'json_object' }
   if (req.routing) body['provider'] = toProviderPreferences(req.routing)
+  if (req.reasoning) {
+    const reasoning: Record<string, unknown> = {}
+    if (req.reasoning.effort) reasoning['effort'] = req.reasoning.effort
+    if (req.reasoning.exclude !== undefined) reasoning['exclude'] = req.reasoning.exclude
+    if (Object.keys(reasoning).length > 0) body['reasoning'] = reasoning
+  }
   // Ask OpenRouter to append token counts and cost to the final chunk.
   body['usage'] = { include: true }
   return body
@@ -96,14 +123,18 @@ export interface SpeedStatsInput {
 
 /**
  * Builds the numbers behind "⚡ 0.42 s to first word · 1.9 s total · 186 tok/s · groq · llama".
- * Throughput counts generation time only (after the first token); without usage numbers the
- * number of content chunks stands in for tokens.
+ * Throughput counts answer tokens over the generation time after the first content token;
+ * reasoning tokens are produced before that point, so they are left out of the count. Without
+ * usage numbers the number of content chunks stands in for tokens.
  */
 export function computeSpeedStats(input: SpeedStatsInput): SpeedStats {
   const totalMs = Math.max(0, input.endedAt - input.startedAt)
   const ttftMs =
     input.firstTokenAt === null ? null : Math.max(0, input.firstTokenAt - input.startedAt)
-  const tokens = input.usage?.completionTokens ?? (input.deltaCount > 0 ? input.deltaCount : null)
+  const completion = input.usage?.completionTokens ?? null
+  const answerTokens =
+    completion === null ? null : Math.max(0, completion - (input.usage?.reasoningTokens ?? 0))
+  const tokens = answerTokens ?? (input.deltaCount > 0 ? input.deltaCount : null)
   let tokensPerSec: number | null = null
   if (ttftMs !== null && tokens !== null && tokens > 0) {
     const genMs = totalMs - ttftMs
@@ -134,6 +165,7 @@ interface WireUsage {
   prompt_tokens?: unknown
   completion_tokens?: unknown
   cost?: unknown
+  completion_tokens_details?: { reasoning_tokens?: unknown } | null
 }
 
 interface WireChoice {
@@ -171,10 +203,16 @@ function firstChoice(chunk: WireChunk): WireChoice | null {
 }
 
 function mergeUsage(prev: ChatUsage | null, raw: WireUsage): ChatUsage {
+  const details = raw.completion_tokens_details
+  const reasoning =
+    (details && typeof details === 'object' ? num(details.reasoning_tokens) : null) ??
+    prev?.reasoningTokens ??
+    null
   return {
     promptTokens: num(raw.prompt_tokens) ?? prev?.promptTokens ?? null,
     completionTokens: num(raw.completion_tokens) ?? prev?.completionTokens ?? null,
     costUsd: num(raw.cost) ?? prev?.costUsd ?? null,
+    ...(reasoning !== null ? { reasoningTokens: reasoning } : {}),
   }
 }
 
@@ -228,6 +266,7 @@ export class OpenRouterLLM implements LLMProvider {
   private readonly idleTimeoutMs: number
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
   private readonly onFinished: ((info: ChatFinishedInfo) => void) | null
+  private readonly onIncomplete: ((info: ChatIncompleteInfo) => void) | null
 
   constructor(opts: OpenRouterLLMOptions) {
     this.http = opts.http
@@ -237,6 +276,7 @@ export class OpenRouterLLM implements LLMProvider {
     this.idleTimeoutMs = opts.idleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS
     this.sleep = opts.sleep ?? defaultSleep
     this.onFinished = opts.onFinished ?? null
+    this.onIncomplete = opts.onIncomplete ?? null
   }
 
   async *streamChat(req: ChatRequest): AsyncGenerator<ChatStreamEvent, void, undefined> {
@@ -417,7 +457,25 @@ export class OpenRouterLLM implements LLMProvider {
       external?.removeEventListener('abort', onExternalAbort)
       // Consumer stopped early or something failed: make sure the HTTP request is torn down.
       if (!completed && !inner.signal.aborted) inner.abort()
+      // OpenRouter had already started this generation, so it is billed although we never saw
+      // the final usage chunk: look its cost up once it is final.
+      if (!completed && generationId) this.reportIncomplete(req, generationId)
     }
+  }
+
+  private reportIncomplete(req: ChatRequest, generationId: string): void {
+    const hook = this.onIncomplete
+    if (!hook) return
+    const tag = req.tag ? `[${req.tag}] ` : ''
+    void (async () => {
+      try {
+        await this.sleep(INCOMPLETE_STATS_DELAY_MS)
+        const stats = await this.getGenerationStats(generationId)
+        if (stats) hook({ request: req, generationId, stats })
+      } catch (err) {
+        this.log.debug(`${tag}Could not record the cost of an unfinished generation`, err)
+      }
+    })()
   }
 
   /**

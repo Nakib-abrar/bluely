@@ -1,6 +1,7 @@
 import type { SpeedStats, TranscriptLine } from '@shared/types'
 import type { Logger } from '../log'
 import type { ChatMessage, LLMProvider, ProviderRouting } from '../providers/llm/LLMProvider'
+import { answerBudget } from '../providers/llm/reasoning'
 import { PROMPT_SPEAKER, formatTimestamp, mergeTranscriptLines, usableLines } from './format'
 import { actionInstruction } from './prompts'
 import { estimateMessagesTokens, estimateTokens } from './tokens'
@@ -158,12 +159,15 @@ export class RunningSummarizer {
         lines: batch.length,
         promptTokens: estimateMessagesTokens(messages),
       })
+      // A reasoning Fast model could otherwise spend all 800 tokens thinking and return nothing.
+      const budget = answerBudget(model, SUMMARY_MAX_TOKENS)
       const res = await this.opts.llm.complete({
         model,
         routing,
         messages,
         temperature: 0.2,
-        maxTokens: SUMMARY_MAX_TOKENS,
+        maxTokens: budget.maxTokens,
+        ...(budget.reasoning ? { reasoning: budget.reasoning } : {}),
         signal: controller.signal,
         tag: 'summary',
       })
