@@ -152,6 +152,82 @@ describe('PRIVACY.md: what is stored', () => {
   })
 })
 
+describe('Ask across meetings is not stored', () => {
+  it('AiService persists every card except the search ones', () => {
+    // If this changes, PRIVACY.md and ARCHITECTURE.md must say that these questions are stored.
+    const source = read('src', 'main', 'live', 'aiService.ts')
+    expect(source).toMatch(
+      /function isPersisted\(card: AiCard\): boolean \{\s*return card\.scope !== 'search'\s*\}/,
+    )
+  })
+
+  it('PRIVACY.md and ARCHITECTURE.md say so where they list stored AI messages', () => {
+    const stored = section(privacy, '## What is stored, and where')
+    const db = flat(stored.split('\n').find((l) => l.startsWith('| `bluely.db`')) ?? '')
+    expect(db).toMatch(/AI messages including the prompts sent and the responses received/)
+    expect(db).toMatch(
+      /except "Ask across meetings": those questions and answers are kept in memory only/,
+    )
+    const architecture = flat(read('docs', 'ARCHITECTURE.md'))
+    const table = /\| `ai_messages` \|([^|]*)\|/.exec(architecture)?.[1] ?? ''
+    expect(table).toMatch(/every AI request except "Ask across meetings" \(kept in memory only\)/)
+    expect(architecture).toMatch(/its questions and answers are not written to `bluely\.db`/)
+  })
+})
+
+describe('PRIVACY.md: what is written outside %APPDATA%\\Bluely', () => {
+  const pkg = JSON.parse(read('package.json')) as { name: string }
+  // app-builder-lib writes updaterCacheDirName into app-update.yml; electron-updater keeps its
+  // cache in %LOCALAPPDATA%\<that name>, and the NSIS installer copies itself there.
+  const appInfo = read('node_modules', 'app-builder-lib', 'out', 'appInfo.js')
+  const nsisTarget = read(
+    'node_modules',
+    'app-builder-lib',
+    'out',
+    'targets',
+    'nsis',
+    'NsisTarget.js',
+  )
+  const installerNsh = read(
+    'node_modules',
+    'app-builder-lib',
+    'templates',
+    'nsis',
+    'include',
+    'installer.nsh',
+  )
+  const updaterCache = read('node_modules', 'electron-updater', 'out', 'AppAdapter.js')
+  const outside = flat(
+    privacy.slice(
+      privacy.indexOf('Outside this folder'),
+      privacy.indexOf('**Audio is never stored.**'),
+    ),
+  )
+
+  it('derives the updater cache folder the way electron-builder and electron-updater do', () => {
+    expect(appInfo).toMatch(
+      /get updaterCacheDirName\(\) \{\s*return this\.sanitizedName\.toLowerCase\(\) \+ "-updater";/,
+    )
+    expect(updaterCache).toContain('process.env["LOCALAPPDATA"]')
+    expect(nsisTarget).toMatch(
+      /APP_INSTALLER_STORE_FILE = `\$\{appInfo\.updaterCacheDirName\}\\\\\$\{builder_util_runtime_1\.CURRENT_APP_INSTALLER_FILE_NAME\}`/,
+    )
+    expect(installerNsh).toContain(
+      '!insertmacro copyFile "$EXEPATH" "$LOCALAPPDATA\\${APP_INSTALLER_STORE_FILE}"',
+    )
+  })
+
+  it('lists the Run value, the updater cache and exported files, not "one thing"', () => {
+    expect(outside).not.toMatch(/one thing/)
+    expect(outside).toContain('HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run')
+    expect(outside).toContain(`\`%LOCALAPPDATA%\\${pkg.name.toLowerCase()}-updater\``)
+    expect(outside).toContain('`installer.exe`')
+    expect(outside).toContain('`pending`')
+    expect(outside).toMatch(/Uninstalling does not remove this folder/)
+    expect(outside).toMatch(/_Export all_ .* write a file where you choose/)
+  })
+})
+
 describe('PRIVACY.md: what is sent to OpenRouter', () => {
   it('lists the microphone test recording, which is uploaded outside any session', () => {
     const openRouter = flat(

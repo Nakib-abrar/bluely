@@ -11,7 +11,9 @@ name: Release
 # ago, which made a re-run attach SHA256SUMS.txt for binaries that were never uploaded. Now a new
 # release is created as a draft and published only after every file, checksums last, is attached
 # (the auto-updater never sees a half-uploaded release); a re-run replaces all files of an
-# existing release from the same build; and any failed upload fails the job.
+# existing release from the same build (without touching its "Latest" status); a draft is
+# marked Latest only when no published release has a higher version; and any failed upload
+# fails the job.
 
 on:
   push:
@@ -125,6 +127,7 @@ jobs:
           if IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
             echo "Release $TAG already exists (draft: $IS_DRAFT); replacing all of its files."
           else
+            IS_DRAFT=new
             gh release create "$TAG" --draft --verify-tag --title "Bluely $VERSION" \
               --notes "What changed: [CHANGELOG.md](https://github.com/$GH_REPO/blob/$TAG/CHANGELOG.md). Check downloads against SHA256SUMS.txt (see the README, Install)."
           fi
@@ -133,8 +136,24 @@ jobs:
           for f in "${ASSETS[@]}"; do
             gh release upload "$TAG" "$f" --clobber
           done
-          gh release edit "$TAG" --draft=false
-          echo "Published $TAG: ${ASSETS[*]}"
+          if [ "$IS_DRAFT" = false ]; then
+            # Re-run for a release that is already public: its files were replaced above; leave
+            # the release itself alone. An edit would send make_latest, which the API defaults to
+            # true, and could mark an old release "Latest" (the updater and README follow Latest).
+            echo "Replaced the files of $TAG; it stays published and keeps its Latest status."
+            exit 0
+          fi
+          # Publishing a draft: "Latest" only if no published release has a higher version (a
+          # fix release for an older line must not become Latest). make_latest is always explicit.
+          NEWEST="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1000 \
+            --json tagName --jq '.[].tagName' | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -n 1)"
+          LATEST=true
+          if [ -n "$NEWEST" ] && [ "$(printf '%s\n' "$NEWEST" "$TAG" | sort -V | tail -n 1)" != "$TAG" ]; then
+            LATEST=false
+          fi
+          gh release edit "$TAG" --draft=false --latest="$LATEST"
+          echo "Published $TAG (latest: $LATEST; newest other release: ${NEWEST:-none}): ${ASSETS[*]}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
