@@ -216,7 +216,7 @@ describe('mailtoUrl', () => {
 })
 
 describe('exportAllZip', () => {
-  it('writes the JSON export and one Markdown file per session, without prompts or keys', () => {
+  it('writes the JSON export and one Markdown file per session, without prompts or keys', async () => {
     const r = makeRepos()
     const settings = new SettingsStore(r.db)
     settings.update({ profile: { name: 'Ada', about: 'my key is sk-or-v1-abcdefghijklmnop' } })
@@ -269,7 +269,7 @@ describe('exportAllZip', () => {
       usedScreen: false,
     })
 
-    const zip = exportAllZip(r.db, { version: '1.2.3', nowMs: JAN_10_2026, timeZone: 'UTC' })
+    const zip = await exportAllZip(r.db, { version: '1.2.3', nowMs: JAN_10_2026, timeZone: 'UTC' })
     const files = unzipSync(zip)
     expect(Object.keys(files).sort()).toEqual([
       'bluely-export.json',
@@ -326,9 +326,9 @@ describe('exportAllZip', () => {
     expect(md).toContain('- [x] Follow up')
   })
 
-  it('exports an empty database', () => {
+  it('exports an empty database', async () => {
     const r = makeRepos()
-    const files = unzipSync(exportAllZip(r.db))
+    const files = unzipSync(await exportAllZip(r.db))
     expect(Object.keys(files)).toEqual(['bluely-export.json'])
     const json = JSON.parse(strFromU8(files['bluely-export.json'] ?? new Uint8Array())) as {
       sessions: unknown[]
@@ -336,5 +336,58 @@ describe('exportAllZip', () => {
     }
     expect(json.sessions).toEqual([])
     expect(json.version).toBe('unknown')
+  })
+})
+
+describe('exportAllZip on a large history', () => {
+  it('yields to the event loop between sessions and while compressing, with identical output', async () => {
+    const r = makeRepos()
+    const big = 'x'.repeat(300) // incompressible enough per line once numbered
+    for (let s = 0; s < 6; s++) {
+      seedSession(r, {
+        id: `s${s}`,
+        title: `Meeting ${s}`,
+        startedAt: JAN_10_2026 + s * 60_000,
+        lines: Array.from({ length: 400 }, (_, i): ['me', string] => [
+          'me',
+          `${s}-${i} ${Math.random().toString(36)} ${big}`,
+        ]),
+      })
+    }
+    let yields = 0
+    const zip = await exportAllZip(r.db, {
+      nowMs: JAN_10_2026,
+      timeZone: 'UTC',
+      yieldFn: async () => {
+        yields++
+      },
+    })
+    // One yield per session at least, plus chunked deflate of the >256 KB JSON.
+    expect(yields).toBeGreaterThan(6 + 1)
+    const files = unzipSync(zip)
+    expect(Object.keys(files)).toHaveLength(7)
+    const text = strFromU8(files['bluely-export.json'] ?? new Uint8Array())
+    expect(text.length).toBeGreaterThan(256 * 1024)
+    // Serialized piecewise, but byte-identical to pretty-printing the whole payload at once.
+    expect(text).toBe(JSON.stringify(JSON.parse(text), null, 2))
+    const json = JSON.parse(text) as { sessions: { id: string; transcript: unknown[] }[] }
+    expect(json.sessions.map((s) => s.id)).toEqual(['s0', 's1', 's2', 's3', 's4', 's5'])
+    expect(json.sessions.every((s) => s.transcript.length === 400)).toBe(true)
+  })
+
+  it('lets other work run while exporting', async () => {
+    const r = makeRepos()
+    for (let s = 0; s < 3; s++) seedSession(r, { id: `s${s}`, startedAt: JAN_10_2026 + s })
+    let ticks = 0
+    const timer = setInterval(() => ticks++, 0)
+    try {
+      const pending = exportAllZip(r.db, {
+        yieldFn: () => new Promise((resolve) => setTimeout(resolve, 2)),
+      })
+      await pending
+    } finally {
+      clearInterval(timer)
+    }
+    expect(ticks).toBeGreaterThan(0)
   })
 })

@@ -106,13 +106,27 @@ function decodeUtf16(data: Uint8Array, order: 'le' | 'be'): string {
   return new TextDecoder('utf-16le').decode(swapped)
 }
 
+/**
+ * Windows-1252 code points for bytes 0x80–0x9F (0 = undefined, kept as the C1 control).
+ * Decoded by hand: some Node builds treat TextDecoder('windows-1252') as ISO-8859-1 and
+ * return C1 controls there, which normalizeText would then strip.
+ */
+const CP1252_HIGH = [
+  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152,
+  0, 0x017d, 0, 0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161,
+  0x203a, 0x0153, 0, 0x017e, 0x0178,
+]
+
 function decodeLatin1(data: Uint8Array): string {
-  try {
-    // WHATWG "latin1" is windows-1252, which maps 0x80–0x9F to curly quotes, dashes, €, …
-    return new TextDecoder('windows-1252').decode(data)
-  } catch {
-    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('latin1')
+  let out = ''
+  const CHUNK = 8192
+  for (let i = 0; i < data.length; i += CHUNK) {
+    const codes = Array.from(data.subarray(i, i + CHUNK), (b) =>
+      b >= 0x80 && b <= 0x9f ? CP1252_HIGH[b - 0x80] || b : b,
+    )
+    out += String.fromCharCode(...codes)
   }
+  return out
 }
 
 /**

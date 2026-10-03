@@ -1,4 +1,6 @@
+import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
+import { runMigrations } from '@main/db/migrations'
 import {
   buildFtsQuery,
   buildSnippet,
@@ -7,12 +9,14 @@ import {
   excerptAround,
   fuzzyMatch,
   looksLikeQuestion,
+  SearchService,
+  type SessionMatchLimits,
   tokenize,
   trigramsOf,
 } from '@main/db/search'
 import { SNIPPET_MARK_END, SNIPPET_MARK_START } from '@shared/constants'
 import type { SearchResult } from '@shared/types'
-import { DAY, makeRepos, seedSession, type Repos } from './fixtures'
+import { DAY, line, makeRepos, seedSession, type Repos } from './fixtures'
 
 const NOW = Date.UTC(2026, 5, 1)
 const S = SNIPPET_MARK_START
@@ -74,6 +78,75 @@ function corpus(): Repos {
 
 const sessionIds = (res: SearchResult) => res.groups.map((g) => g.session.id)
 
+/**
+ * In-memory database that records every statement it runs (with its bound values) and counts
+ * the rows its statements hand back to JS.
+ */
+function tracedDb() {
+  const statements: string[] = []
+  const db = new Database(':memory:', { verbose: (sql) => statements.push(String(sql)) })
+  db.pragma('foreign_keys = ON')
+  runMigrations(db)
+  const read = { rows: 0 }
+  const prepare = db.prepare.bind(db)
+  db.prepare = ((source: string) => {
+    const stmt = prepare(source)
+    const all = stmt.all.bind(stmt) as (...params: unknown[]) => unknown[]
+    const get = stmt.get.bind(stmt) as (...params: unknown[]) => unknown
+    const iterate = stmt.iterate.bind(stmt) as (...params: unknown[]) => IterableIterator<unknown>
+    return Object.assign(stmt, {
+      all: (...params: unknown[]) => {
+        const rows = all(...params)
+        read.rows += rows.length
+        return rows
+      },
+      get: (...params: unknown[]) => {
+        const row = get(...params)
+        if (row !== undefined) read.rows++
+        return row
+      },
+      iterate: function* (...params: unknown[]) {
+        for (const row of iterate(...params)) {
+          read.rows++
+          yield row
+        }
+      },
+    })
+  }) as typeof db.prepare
+  return { db, statements, read }
+}
+
+/** Statements that searched the index (MATCH), from a tracedDb() log. */
+const matchStatements = (statements: string[]) => statements.filter((sql) => /\bMATCH\b/.test(sql))
+
+/**
+ * 40 meetings of 200 lines (s39 is the most recent). Every line says exactly one of alpha,
+ * bravo, charlie and — in even meetings — delta (echo in odd ones), so no line has two of
+ * them; the first line of every meeting also says "zebra".
+ */
+function spreadCorpus(r: Repos): void {
+  r.db.transaction(() => {
+    for (let s = 0; s < 40; s++) {
+      const id = `s${s}`
+      r.sessions.create({ id, modeId: null, startedAt: NOW - (40 - s) * DAY })
+      r.sessions.rename(id, `Meeting ${s}`)
+      r.sessions.setStatus(id, 'done')
+      const words = ['alpha', 'bravo', 'charlie', s % 2 === 0 ? 'delta' : 'echo']
+      for (let i = 0; i < 200; i++) {
+        const text = `${words[i % 4]}${i === 0 ? ' zebra' : ''} item ${i}`
+        r.transcript.upsert(line(id, 'them', i * 1000, text))
+      }
+    }
+  })()
+}
+
+/** The highlighted word of each hit's snippet. */
+const markedWords = (hits: { snippet: string }[]) =>
+  hits.map((h) => new RegExp(`${S}(\\w+)${E}`).exec(h.snippet)?.[1])
+
+/** s38, s36, …, s0: the meetings of spreadCorpus() that say all of alpha … delta. */
+const EVEN_MEETINGS = Array.from({ length: 20 }, (_, k) => `s${38 - 2 * k}`)
+
 describe('tokenize / query builders', () => {
   it('extracts lower-case letter/digit runs (Bangla marks included), max 8, de-duplicated', () => {
     expect(tokenize('  Enterprise PLAN, q3-budget!! ')).toEqual([
@@ -87,6 +160,19 @@ describe('tokenize / query builders', () => {
     expect(tokenize('plan Plan PLAN')).toEqual(['plan'])
     expect(tokenize('"*^:()-+')).toEqual([])
     expect(tokenize('\u0301')).toEqual([]) // a lone combining mark is not a token
+  })
+
+  it('drops possessives, contractions and one-letter pieces when a longer word exists', () => {
+    expect(tokenize("acme's")).toEqual(['acme'])
+    expect(tokenize('acme\u2019s plan')).toEqual(['acme', 'plan'])
+    expect(tokenize("we'll don't they're I've I'd I'm")).toEqual(['we', 'don', 'they'])
+    expect(tokenize('e-mail')).toEqual(['mail'])
+    expect(tokenize('AT&T contract')).toEqual(['at', 'contract'])
+    // Only one-letter tokens: kept (searched as one adjacent run).
+    expect(tokenize('Q&A')).toEqual(['q', 'a'])
+    expect(tokenize('s')).toEqual(['s'])
+    // A quote that is not an apostrophe inside a word does not drop the letter.
+    expect(tokenize("'s plan")).toEqual(['plan'])
   })
 
   it('builds quoted prefix queries and trigram OR queries', () => {
@@ -145,7 +231,43 @@ describe('SearchService.query', () => {
     const res = r.search.query('enterprise seat')
     expect(sessionIds(res)).toEqual(['pricing'])
     expect(res.groups[0]?.hits.map((h) => h.kind)).toEqual(['transcript'])
-    expect(sessionIds(r.search.query('enterprise login'))).toEqual([])
+    expect(sessionIds(r.search.query('enterprise nonexistentword'))).toEqual([])
+  })
+
+  it('finds meetings whose words are spread over several items (title, lines)', () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'acme',
+      title: 'Acme kickoff',
+      startedAt: NOW - DAY,
+      lines: [
+        ['them', 'we discussed pricing in detail'],
+        ['me', 'budget is tight'],
+      ],
+    })
+    seedSession(r, {
+      id: 'other',
+      title: 'Pricing sync',
+      startedAt: NOW - 2 * DAY,
+      lines: [['them', 'nothing about money here']],
+    })
+    seedSession(r, {
+      id: 'one-line',
+      title: 'Budget call',
+      startedAt: NOW - 3 * DAY,
+      lines: [['them', 'the pricing budget is final']],
+    })
+    expect(sessionIds(r.search.query('acme'))).toEqual(['acme'])
+    const acme = r.search.query('acme pricing')
+    expect(sessionIds(acme)).toEqual(['acme'])
+    expect(acme.fuzzy).toBe(false)
+    expect(acme.groups[0]?.hits.map((h) => h.kind).sort()).toEqual(['title', 'transcript'])
+    expect(acme.groups[0]?.hits.find((h) => h.kind === 'title')?.snippet).toBe(
+      `${S}Acme${E} kickoff`,
+    )
+    // All words in one line ranks above words spread over the meeting.
+    expect(sessionIds(r.search.query('pricing budget'))).toEqual(['one-line', 'acme'])
+    expect(sessionIds(r.search.query('acme money'))).toEqual([])
   })
 
   it('keeps at most 3 hits per session', () => {
@@ -258,8 +380,182 @@ describe('SearchService.query', () => {
     expect(sessionIds(r.search.query('text:enterprise'))).toEqual([])
     expect(sessionIds(r.search.query('enterprise:plan'))).toEqual(['pricing'])
     expect(sessionIds(r.search.query('NEAR(enterprise plan'))).toEqual([])
-    expect(sessionIds(r.search.query('enterprise AND plan'))).toEqual([])
+    // "AND" is a plain word too: this meeting says "and" in its notes, "enterprise plan" in a line.
+    expect(sessionIds(r.search.query('enterprise AND plan'))).toEqual(['pricing'])
+    expect(sessionIds(r.search.query('enterprise NOT plan'))).toEqual([])
     expect(sessionIds(r.search.query('-annually'))).toEqual(['pricing'])
+  })
+
+  it("ignores possessives and one-letter pieces (\"acme's\", 'Q&A')", () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'acme',
+      title: 'Acme kickoff',
+      startedAt: NOW - DAY,
+      lines: [['them', 'Acme wants a discount']],
+      notesMarkdown: 'Acme renewal planning',
+    })
+    seedSession(r, {
+      id: 'qa',
+      title: 'Q&A session',
+      startedAt: NOW - 2 * DAY,
+      lines: [['them', 'quick answer about apples']],
+    })
+    expect(sessionIds(r.search.query("acme's"))).toEqual(['acme'])
+    expect(sessionIds(r.search.query('acme\u2019s'))).toEqual(['acme'])
+    expect(sessionIds(r.search.query("Acme's renewal"))).toEqual(['acme'])
+    // "Q&A" is the adjacent run q, a — not any q-word plus any a-word.
+    const qa = r.search.query('Q&A')
+    expect(sessionIds(qa)).toEqual(['qa'])
+    expect(qa.groups[0]?.hits.map((h) => h.kind)).toEqual(['title'])
+  })
+
+  it('runs one MATCH for a one-word query and never re-runs MATCH per hit', () => {
+    // A one-letter prefix has no prefix index; re-running MATCH for every hit to build its
+    // snippet (snippet() with rowid IN json_each(…)) froze the main process for seconds on a
+    // large history. Snippets are built in JS from the stored text now.
+    const { db, statements } = tracedDb()
+    const r = makeRepos(db)
+    const words = ['sales', 'sync', 'status', 'scope', 'seats', 'some', 'say', 'sure']
+    db.transaction(() => {
+      for (let s = 0; s < 30; s++) {
+        r.sessions.create({ id: `m${s}`, modeId: null, startedAt: NOW - s * DAY })
+        r.sessions.setStatus(`m${s}`, 'done')
+        for (let i = 0; i < 20; i++) {
+          r.transcript.upsert(
+            line(`m${s}`, 'them', i * 1000, `${words[i % 8]} ${words[(i + s) % 8]} line ${i}`),
+          )
+        }
+      }
+    })()
+    const perHitMatch = (sql: string) => /\bsnippet\s*\(|\bjson_each\b|\browid\s+IN\b/i.test(sql)
+    for (const q of ['s', "sales's", 'say t', 'sales sync']) {
+      statements.length = 0
+      const res = r.search.query(q)
+      expect(res.groups).toHaveLength(30)
+      expect(res.groups.reduce((n, g) => n + g.hits.length, 0)).toBeGreaterThan(60)
+      for (const g of res.groups) for (const h of g.hits) expect(h.snippet).toContain(S)
+      const matches = matchStatements(statements)
+      expect(matches.filter(perHitMatch)).toEqual([])
+      // One word ("s", "sales's" → sales, "say t" → say): the candidate query and nothing else.
+      if (tokenize(q).length === 1) expect(matches).toHaveLength(1)
+    }
+  })
+
+  it('matches words spread over a meeting exactly while the work fits the limits', () => {
+    const r = makeRepos()
+    spreadCorpus(r)
+    // No line has two of these words, so every match is at the meeting level.
+    const all = r.search.query('alpha bravo charlie delta')
+    expect(sessionIds(all)).toEqual(EVEN_MEETINGS)
+    expect(all.fuzzy).toBe(false)
+    for (const g of all.groups) {
+      // One hit per word (≤ 3), each in a line of that meeting.
+      expect(new Set(markedWords(g.hits)).size).toBe(3)
+      expect(g.hits.every((h) => h.sessionId === g.session.id && h.kind === 'transcript')).toBe(
+        true,
+      )
+    }
+    const rare = r.search.query('zebra delta')
+    expect(sessionIds(rare)).toEqual(EVEN_MEETINGS)
+    for (const g of rare.groups) expect(markedWords(g.hits).sort()).toEqual(['delta', 'zebra'])
+    expect(sessionIds(r.search.query('alpha echo', 5))).toEqual(['s39', 's37', 's35', 's33', 's31'])
+  })
+
+  it('caps the rows it reads to match words across a meeting, however common the words', () => {
+    const { db, statements, read } = tracedDb()
+    const r = makeRepos(db)
+    spreadCorpus(r)
+    const limits: SessionMatchLimits = { mapRows: 600, scanRows: 1000 }
+    const search = new SearchService(db, undefined, limits)
+    const run = (q: string) => {
+      statements.length = 0
+      read.rows = 0
+      const res = search.query(q)
+      // Nothing reads all rows of a word: every index search stops at a LIMIT, and none
+      // aggregates a word's rows in SQL (GROUP BY reads every row of "the").
+      for (const sql of matchStatements(statements)) {
+        expect(sql).toMatch(/\bLIMIT\b/)
+        expect(sql).not.toMatch(/\bGROUP BY\b/)
+      }
+      // Each of these words is in 1000–2000 lines; reading them all is 7000 rows.
+      expect(read.rows).toBeLessThanOrEqual(limits.mapRows + limits.scanRows + 100)
+      return res
+    }
+
+    // Every word is too common to map: the rarest (delta) proposes the meetings of its 600
+    // newest lines, and the other words turn up within the first items of each of them.
+    const common = run('alpha bravo charlie delta')
+    expect(sessionIds(common)).toEqual(EVEN_MEETINGS.slice(0, 12))
+    expect(common.fuzzy).toBe(false)
+    for (const g of common.groups) expect(g.hits).toHaveLength(3)
+
+    // "zebra" maps all 40 meetings; delta has to be looked for in each of them, and the odd
+    // ones have to be read to the end to rule them out, until the scan budget runs out.
+    const scanned = run('zebra delta')
+    expect(sessionIds(scanned)).toEqual(EVEN_MEETINGS.slice(0, 4))
+    for (const g of scanned.groups) {
+      expect(g.hits.map((h) => h.snippet)).toEqual([
+        `alpha ${S}zebra${E} item 0`,
+        `${S}delta${E} item 3`,
+      ])
+    }
+  })
+
+  it('caps the rows read when a typo match leaves a common word to find in the meeting', () => {
+    const { db, statements, read } = tracedDb()
+    const r = makeRepos(db)
+    db.transaction(() => {
+      for (let s = 0; s < 10; s++) {
+        const id = `t${s}`
+        r.sessions.create({ id, modeId: null, startedAt: NOW - (10 - s) * DAY })
+        r.sessions.setStatus(id, 'done')
+        for (let i = 0; i < 100; i++) {
+          r.transcript.upsert(line(id, 'them', i * 1000, `the plan for item ${i}`))
+        }
+        if (s >= 7) r.transcript.upsert(line(id, 'me', 200_000, 'zorblux report'))
+      }
+    })()
+    const search = new SearchService(db, undefined, { mapRows: 50, scanRows: 100 })
+    statements.length = 0
+    read.rows = 0
+    // "zorblax" is a typo of "zorblux" (one line); "th" is in every other line, never in that
+    // one, so it is looked up elsewhere in each meeting: 1000 lines, read only up to the cap.
+    const res = search.query('zorblax th')
+    expect(res.fuzzy).toBe(true)
+    expect(sessionIds(res)).toEqual(['t9', 't8', 't7'])
+    for (const g of res.groups) {
+      expect(g.hits.map((h) => h.snippet)).toEqual([
+        `${S}zorblux${E} report`,
+        `${S}the${E} plan for item 0`,
+      ])
+    }
+    for (const sql of matchStatements(statements)) expect(sql).not.toMatch(/\bGROUP BY\b/)
+    expect(read.rows).toBeLessThanOrEqual(50 + 100 + 30)
+  })
+
+  it('finds Bangla text whose stored form was not NFC (precomposed য়)', () => {
+    const r = makeRepos()
+    const precomposed = '\u09b8\u09ae\u09df' // সময় with U+09DF
+    expect(precomposed.normalize('NFC')).not.toBe(precomposed)
+    seedSession(r, {
+      id: 'bn',
+      title: `${precomposed} নিয়ে কথা`,
+      startedAt: NOW - DAY,
+      lines: [['them', `আমাদের ${precomposed} কম আছে`]],
+      notesMarkdown: `${precomposed} কম`,
+      actionItems: [{ text: `${precomposed} ঠিক করা` }],
+    })
+    for (const q of [precomposed, precomposed.normalize('NFC')]) {
+      const res = r.search.query(q)
+      expect(sessionIds(res)).toEqual(['bn'])
+      expect(res.fuzzy).toBe(false)
+    }
+    expect(r.search.retrieveForQuestion(`${precomposed} কত?`).length).toBeGreaterThan(0)
+    // Stored in NFC, so the stored text equals what queries are normalized to.
+    expect(r.transcript.listBySession('bn')[0]?.text).toBe(
+      `আমাদের ${precomposed} কম আছে`.normalize('NFC'),
+    )
   })
 
   it('returns an empty result for empty or whitespace queries', () => {

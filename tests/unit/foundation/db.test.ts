@@ -145,3 +145,48 @@ describe('database file', () => {
     reopened.close()
   })
 })
+
+describe('migration 3 (indexed text in NFC)', () => {
+  it('converts stored titles, lines, notes and action items to NFC and re-indexes them', async () => {
+    const { default: Database } = await import('better-sqlite3')
+    const { MIGRATIONS, runMigrations } = await import('@main/db/migrations')
+    const db = new Database(':memory:')
+    db.pragma('foreign_keys = ON')
+    // A database written by version 2, before repositories normalized text.
+    for (const m of MIGRATIONS.filter((x) => x.version <= 2)) m.up(db)
+    db.pragma('user_version = 2')
+    const word = 'সময়' // সময় with the precomposed U+09DF
+    const nfc = word.normalize('NFC')
+    expect(nfc).not.toBe(word)
+    db.prepare(
+      "INSERT INTO sessions(id, title, started_at, status, created_at) VALUES ('s1', ?, 1, 'done', 1)",
+    ).run(`${word} title`)
+    db.prepare(
+      "INSERT INTO transcript_lines(id, session_id, channel, start_ms, end_ms, text, is_final) VALUES ('l1', 's1', 'them', 0, 1, ?, 1)",
+    ).run(`line ${word}`)
+    db.prepare(
+      "INSERT INTO ai_messages(id, session_id, kind, response_text, status, created_at) VALUES ('n1', 's1', 'post_notes', ?, 'done', 1)",
+    ).run(`notes ${word}`)
+    db.prepare(
+      "INSERT INTO action_items(id, session_id, text, sort) VALUES ('a1', 's1', ?, 0)",
+    ).run(`task ${word}`)
+    const hits = () =>
+      db
+        .prepare('SELECT kind FROM search_fts WHERE search_fts MATCH ? ORDER BY kind')
+        .all(`"${nfc}"`)
+        .map((r) => (r as { kind: string }).kind)
+    expect(hits()).toEqual([])
+
+    expect(runMigrations(db)).toEqual({ from: 2, to: LATEST_SCHEMA_VERSION })
+    expect(hits()).toEqual(['action_item', 'notes', 'title', 'transcript'])
+    const get = (sql: string) => (db.prepare(sql).get() as { v: string }).v
+    expect(get('SELECT title AS v FROM sessions')).toBe(`${nfc} title`)
+    expect(get('SELECT text AS v FROM transcript_lines')).toBe(`line ${nfc}`)
+    expect(get('SELECT response_text AS v FROM ai_messages')).toBe(`notes ${nfc}`)
+    expect(get('SELECT text AS v FROM action_items')).toBe(`task ${nfc}`)
+    // The trigram index follows too, and nothing is indexed twice.
+    expect((db.prepare('SELECT count(*) AS c FROM search_trigram').get() as { c: number }).c).toBe(
+      4,
+    )
+  })
+})

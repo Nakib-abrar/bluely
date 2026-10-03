@@ -10,6 +10,7 @@ import type {
 import { ht } from '../../data/messages'
 import { AppError } from '../../errors'
 import { newId, type Db } from '../database'
+import { toNfc } from '../text'
 import { ActionItemsRepo } from './actionItemsRepo'
 import { TranscriptRepo } from './transcriptRepo'
 
@@ -72,7 +73,14 @@ const summaryJsonSchema = z.object({
     .catch(null),
   runningSummary: z.string().nullable().catch(null),
   postCallError: z.string().nullable().catch(null),
+  emailEdited: z.boolean().optional().catch(undefined),
 })
+
+/** Keys updateSummaryJson accepts (EMPTY_SUMMARY_JSON plus the optional flags). */
+const SUMMARY_JSON_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(EMPTY_SUMMARY_JSON),
+  'emailEdited',
+])
 
 /** Parses a stored summary_json value; missing, corrupt or partial data falls back to defaults. */
 export function parseSummaryJson(raw: string | null | undefined): SessionSummaryJson {
@@ -244,7 +252,7 @@ export class SessionsRepo {
       const row = this.stmt.getSummaryJson.get(id) as { summary_json: string | null } | undefined
       if (!row) throw new AppError('not_found', ht('errSessionNotFound'))
       const known = Object.entries(patch).filter(
-        ([key, value]) => value !== undefined && key in EMPTY_SUMMARY_JSON,
+        ([key, value]) => value !== undefined && SUMMARY_JSON_KEYS.has(key),
       )
       const next: SessionSummaryJson = {
         ...parseSummaryJson(row.summary_json),
@@ -283,7 +291,10 @@ function clampLimit(limit: number | undefined): number {
   return Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(limit)))
 }
 
-/** Single line, trimmed, bounded: titles show up in lists, file names and window titles. */
+/**
+ * Single line, trimmed, bounded (titles show up in lists, file names and window titles) and NFC,
+ * like all indexed text (see toNfc).
+ */
 function normalizeTitle(title: string): string {
-  return title.replace(/\s+/g, ' ').trim().slice(0, 200)
+  return toNfc(title).replace(/\s+/g, ' ').trim().slice(0, 200)
 }

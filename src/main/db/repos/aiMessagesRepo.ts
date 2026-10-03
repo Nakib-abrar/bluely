@@ -10,6 +10,7 @@ import type {
   Tier,
 } from '@shared/types'
 import { newId, type Db } from '../database'
+import { toNfc } from '../text'
 
 /** Raw `ai_messages` row. */
 export interface AiMessageRow {
@@ -360,6 +361,8 @@ export class AiMessagesRepo {
     responseText: string,
     stats?: PostCallStats,
   ): string {
+    // Indexed for search: stored in NFC like every other indexed column (see toNfc).
+    const text = toNfc(responseText)
     const tx = this.db.transaction((): string => {
       const ids = (this.stmt.idsOfKind.all(sessionId, kind) as { id: string }[]).map((r) => r.id)
       const [keep, ...extra] = ids
@@ -367,7 +370,7 @@ export class AiMessagesRepo {
       const createdAt = this.now()
       if (keep) {
         if (stats) this.stmt.setPostCallStats.run({ id: keep, createdAt, ...statsParams(stats) })
-        this.stmt.setPostCallText.run(responseText, keep)
+        this.stmt.setPostCallText.run(text, keep)
         return keep
       }
       const id = newId()
@@ -375,7 +378,7 @@ export class AiMessagesRepo {
         id,
         sessionId,
         kind,
-        responseText,
+        responseText: text,
         createdAt,
         ...statsParams(stats ?? {}),
       })
