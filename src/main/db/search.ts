@@ -361,6 +361,25 @@ export function foldForMatch(word: string): string {
   return word.normalize('NFD').replace(LATIN_DIACRITICS_RE, '').normalize('NFC').toLowerCase()
 }
 
+const NON_ASCII_RE = /[\u0080-\uffff]/
+
+/** {@link foldForMatch} for a whole text; plain ASCII only needs lower-casing. */
+function foldText(text: string): string {
+  return NON_ASCII_RE.test(text) ? foldForMatch(text) : text.toLowerCase()
+}
+
+/**
+ * True when `token` starts a word of a folded text, as for the FTS prefix query `"token"*`
+ * (FTS words are runs of letters, digits, marks and private-use characters). A plain
+ * substring check rules out most texts before the regex runs.
+ */
+function wordPrefixMatcher(token: string): (folded: string) => boolean {
+  const folded = foldForMatch(token)
+  const literal = folded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(?<![\\p{L}\\p{N}\\p{M}\\p{Co}])${literal}`, 'u')
+  return (text) => text.includes(folded) && re.test(text)
+}
+
 function stripMarks(text: string): string {
   return text.replaceAll(SNIPPET_MARK_START, '').replaceAll(SNIPPET_MARK_END, '')
 }
@@ -473,11 +492,18 @@ interface TrigramRow extends FtsRow {
   text: string
 }
 
-interface SessionRowHit {
+interface WordRow {
   rid: number
   session_id: string
   kind: SearchHitKind
   ref_id: string | null
+}
+
+interface ItemRow {
+  rid: number
+  kind: SearchHitKind
+  ref_id: string | null
+  text: string | null
 }
 
 /**
@@ -502,8 +528,11 @@ interface Candidate {
   tier: number
 }
 
-/** Best exact row per session for one token (lazily computed, cached for one query). */
-type SessionsWithToken = (tokenIndex: number) => Map<string, Candidate>
+interface SessionMatch {
+  sessionId: string
+  /** Score of the session's best hit. */
+  best: number
+}
 
 interface SessionLookupRow {
   id: string
@@ -535,17 +564,219 @@ const KIND_WEIGHT_SQL = `(CASE kind ${Object.entries(KIND_WEIGHT)
   .join(' ')} ELSE 1.0 END)`
 
 /**
+ * A meeting's indexed items, one statement per kind in KIND_WEIGHT order (best first). `rid`
+ * is the item's search index rowid: source rowid * 8 + tag, as the triggers in migrations.ts
+ * write it.
+ */
+const SESSION_ITEMS_SQL = [
+  `SELECT rowid * 8 + 1 AS rid, 'title' AS kind, id AS ref_id, title AS text
+   FROM sessions WHERE id = ?`,
+  `SELECT rowid * 8 + 3 AS rid, 'notes' AS kind, id AS ref_id, response_text AS text
+   FROM ai_messages WHERE session_id = ? AND kind = 'post_notes' AND response_text IS NOT NULL`,
+  `SELECT rowid * 8 + 4 AS rid, 'action_item' AS kind, id AS ref_id, text
+   FROM action_items WHERE session_id = ?`,
+  `SELECT rowid * 8 + 5 AS rid, 'email' AS kind, id AS ref_id, response_text AS text
+   FROM ai_messages WHERE session_id = ? AND kind = 'post_email' AND response_text IS NOT NULL`,
+  `SELECT rowid * 8 + 2 AS rid, 'transcript' AS kind, id AS ref_id, text
+   FROM transcript_lines WHERE session_id = ? AND is_final = 1`,
+]
+
+/** Per-query work limits for matching words anywhere in a meeting, in rows read. */
+export interface SessionMatchLimits {
+  /** Index rows read to map words to the meetings that contain them (rarest words first). */
+  mapRows: number
+  /** Items of candidate meetings read to find the words that were too common to map. */
+  scanRows: number
+}
+
+/**
+ * Each is roughly 10 ms of main-process work, whatever the size of the history (measured on a
+ * synthetic history of 260 meetings × 600 lines).
+ */
+export const SESSION_MATCH_LIMITS: Readonly<SessionMatchLimits> = {
+  mapRows: 5000,
+  scanRows: 5000,
+}
+
+/** Words are counted up to this many times `mapRows` (see SessionWords.count). */
+const COUNT_CAP_FACTOR = 2
+
+/** Returned when the scan budget ran out before a meeting could be decided. */
+const EXHAUSTED = 'exhausted'
+
+interface SessionWordStatements {
+  countUpTo: Statement
+  wordRows: Statement
+  sessionItems: Statement[]
+}
+
+/**
+ * Answers "which meetings contain this word, and in which item?" for the words of one query,
+ * with a bounded amount of work. Mapping a word to its meetings reads every index row of the
+ * word, which for everyday words ("the", "is") is most of the index: a long query of such
+ * words took ~0.4 s on a 156k-line history, blocking the main process. So words are mapped
+ * (rarest first) only while the rows read stay within `limits.mapRows`; the remaining, more
+ * common words are looked for in each candidate meeting's own items, best kind first, which
+ * finds a common word within a few items, within `limits.scanRows`.
+ */
+class SessionWords {
+  private readonly counts = new Map<number, number>()
+  private readonly maps = new Map<number, Map<string, Candidate> | null>()
+  private readonly matchers = new Map<number, (folded: string) => boolean>()
+  private mapRows: number
+  private scanRows: number
+
+  constructor(
+    private readonly stmt: SessionWordStatements,
+    private readonly tokens: string[],
+    private readonly limits: SessionMatchLimits,
+  ) {
+    this.mapRows = limits.mapRows
+    this.scanRows = limits.scanRows
+  }
+
+  /**
+   * Index rows containing word i, counted up to a few times what mapping may read: enough to
+   * tell the rarest of several common words apart, while counting stays index-only and cheap.
+   */
+  count(i: number): number {
+    let n = this.counts.get(i)
+    if (n === undefined) {
+      const cap = COUNT_CAP_FACTOR * this.limits.mapRows + 1
+      n = (this.stmt.countUpTo.get(this.match(i), cap) as { c: number }).c
+      this.counts.set(i, n)
+    }
+    return n
+  }
+
+  /** Word indexes, rarest first; on a tie (also past the count cap), the longer word. */
+  byRarity(): number[] {
+    const length = (i: number) => codePoints(this.tokens[i] ?? '').length
+    return this.tokens
+      .map((_, i) => i)
+      .sort((a, b) => this.count(a) - this.count(b) || length(b) - length(a))
+  }
+
+  /** Every meeting that contains word i, with its best item; null when over the budget. */
+  map(i: number): Map<string, Candidate> | null {
+    let map = this.maps.get(i)
+    if (map === undefined) {
+      map = this.count(i) <= this.mapRows ? this.readRows(i, this.mapRows) : null
+      this.maps.set(i, map)
+    }
+    return map
+  }
+
+  /**
+   * For a word too common to {@link map}: the meetings of its most recent rows, as many as the
+   * rest of the budget reads (it is used up), each with the best of those rows.
+   */
+  recent(i: number): Map<string, Candidate> {
+    return this.readRows(i, this.mapRows)
+  }
+
+  /**
+   * The best item of `sessionId` for each word in `indexes` (same order): from the word's map
+   * when mapping it is affordable, otherwise by {@link scan}. null when a word is not in the
+   * meeting; EXHAUSTED when the scan budget ran out before that was known.
+   */
+  hitsIn(sessionId: string, indexes: number[]): Candidate[] | null | typeof EXHAUSTED {
+    const hits = new Map<number, Candidate>()
+    const unmapped: number[] = []
+    for (const i of indexes) {
+      const map = this.map(i)
+      if (!map) {
+        unmapped.push(i)
+        continue
+      }
+      const hit = map.get(sessionId)
+      if (!hit) return null
+      hits.set(i, hit)
+    }
+    const scanned = unmapped.length ? this.scan(sessionId, unmapped) : []
+    if (scanned === null || scanned === EXHAUSTED) return scanned
+    scanned.forEach((hit, k) => hits.set(unmapped[k] ?? -1, hit))
+    return indexes.flatMap((i) => hits.get(i) ?? [])
+  }
+
+  /**
+   * Reads the items of `sessionId`, best kind first, until each word in `indexes` has turned
+   * up; returns each word's first item (same order). null when a word is not in the meeting;
+   * EXHAUSTED when the scan budget ran out first.
+   */
+  scan(sessionId: string, indexes: number[]): Candidate[] | null | typeof EXHAUSTED {
+    const matchers = indexes.map((i) => this.matcher(i))
+    const hits: (Candidate | undefined)[] = indexes.map(() => undefined)
+    let left = indexes.length
+    for (const stmt of this.stmt.sessionItems) {
+      for (const row of stmt.iterate(sessionId) as IterableIterator<ItemRow>) {
+        if (this.scanRows <= 0) return EXHAUSTED
+        this.scanRows--
+        const text = foldText(row.text ?? '')
+        matchers.forEach((matches, k) => {
+          if (hits[k] || !matches(text)) return
+          hits[k] = sessionHit(sessionId, row)
+          left--
+        })
+        if (!left) return hits.flatMap((h) => h ?? [])
+      }
+    }
+    return null
+  }
+
+  private match(i: number): string {
+    return buildFtsQuery([this.tokens[i] ?? ''])
+  }
+
+  private matcher(i: number): (folded: string) => boolean {
+    let matches = this.matchers.get(i)
+    if (!matches) {
+      matches = wordPrefixMatcher(this.tokens[i] ?? '')
+      this.matchers.set(i, matches)
+    }
+    return matches
+  }
+
+  /** Up to `limit` rows of word i, newest first, as each meeting's best item (by kind). */
+  private readRows(i: number, limit: number): Map<string, Candidate> {
+    const rows = this.stmt.wordRows.all(this.match(i), Math.max(0, limit)) as WordRow[]
+    this.mapRows -= rows.length
+    const out = new Map<string, Candidate>()
+    for (const r of rows) {
+      const hit = sessionHit(r.session_id, r)
+      const prev = out.get(r.session_id)
+      if (!prev || hit.score > prev.score) out.set(r.session_id, hit)
+    }
+    return out
+  }
+}
+
+function sessionHit(
+  sessionId: string,
+  r: { rid: number; kind: SearchHitKind; ref_id: string | null },
+): Candidate {
+  return {
+    rid: r.rid,
+    sessionId,
+    kind: r.kind,
+    refId: r.ref_id,
+    score: KIND_WEIGHT[r.kind] ?? 1,
+    fuzzy: false,
+    tier: TIER_SESSION,
+  }
+}
+
+/**
  * Full-text search over titles, transcripts, notes, action items and follow-up emails, with a
  * trigram fallback for typos, plus retrieval of excerpts for "ask across meetings".
  * Never throws on user input: any SQLite error yields an empty result.
  */
 export class SearchService {
-  private readonly stmt: {
+  private readonly stmt: SessionWordStatements & {
     fts: Statement
-    count: Statement
-    bestRowPerSession: Statement
     trigram: Statement
     sessionsByIds: Statement
+    startedAt: Statement
     sessionForExcerpt: Statement
     sessionLines: Statement
     actionItem: Statement
@@ -555,20 +786,23 @@ export class SearchService {
   constructor(
     private readonly db: Db,
     private readonly log?: Logger,
+    private readonly limits: SessionMatchLimits = SESSION_MATCH_LIMITS,
   ) {
     this.stmt = {
       fts: db.prepare(
         `SELECT rowid AS rid, session_id, kind, ref_id, bm25(search_fts) * ${KIND_WEIGHT_SQL} AS score
          FROM search_fts WHERE search_fts MATCH ? ORDER BY score LIMIT ?`,
       ),
-      // Index-only (no row reads), so cheap even for very common words.
-      count: db.prepare('SELECT count(*) AS c FROM search_fts WHERE search_fts MATCH ?'),
-      // One row per session: max() makes SQLite return the bare columns of the row with the
-      // highest kind weight (title, then notes, …). bm25() is not allowed in an aggregate.
-      bestRowPerSession: db.prepare(
-        `SELECT session_id, rowid AS rid, kind, ref_id, max(${KIND_WEIGHT_SQL}) AS weight
-         FROM search_fts WHERE search_fts MATCH ? GROUP BY session_id`,
+      // Index-only (no row reads), and stops at the limit, so cheap even for "the".
+      countUpTo: db.prepare(
+        'SELECT count(*) AS c FROM (SELECT 1 FROM search_fts WHERE search_fts MATCH ? LIMIT ?)',
       ),
+      // Newest first, so a capped read keeps the most recent meetings.
+      wordRows: db.prepare(
+        `SELECT rowid AS rid, session_id, kind, ref_id
+         FROM search_fts WHERE search_fts MATCH ? ORDER BY rowid DESC LIMIT ?`,
+      ),
+      sessionItems: SESSION_ITEMS_SQL.map((sql) => db.prepare(sql)),
       trigram: db.prepare(
         `SELECT rowid AS rid, session_id, kind, ref_id, text,
                 bm25(search_trigram) * ${KIND_WEIGHT_SQL} AS score
@@ -577,6 +811,9 @@ export class SearchService {
       sessionsByIds: db.prepare(
         `SELECT ${SESSION_SUMMARY_COLUMNS} FROM sessions
          WHERE id IN (SELECT value FROM json_each(?))`,
+      ),
+      startedAt: db.prepare(
+        'SELECT id, started_at FROM sessions WHERE id IN (SELECT value FROM json_each(?))',
       ),
       sessionForExcerpt: db.prepare(
         'SELECT id, title, started_at, summary_json FROM sessions WHERE id = ?',
@@ -601,7 +838,9 @@ export class SearchService {
    * spread over several items. Groups hits by session (≤ 3 each); within each of those tiers
    * sessions are ordered by their best hit, then by recency. `limit` caps the number of
    * sessions. When the exact passes find fewer than 3 sessions, a trigram pass adds close
-   * matches and sets `fuzzy`.
+   * matches and sets `fuzzy`. Matching words across a meeting's items does a bounded amount
+   * of work (see SessionWords): on a very large history, meetings matched that way may be
+   * limited to the most recent ones.
    */
   query(q: string, limit = 50): SearchResult {
     const empty: SearchResult = {
@@ -620,19 +859,11 @@ export class SearchService {
         FTS_CANDIDATES,
       )
       const found = new Set(candidates.map((c) => c.sessionId))
-      const cache = new Map<number, Map<string, Candidate>>()
-      const sessionsWith: SessionsWithToken = (i) => {
-        let rows = cache.get(i)
-        if (!rows) {
-          rows = this.bestRowPerSession(tokens[i] ?? '')
-          cache.set(i, rows)
-        }
-        return rows
-      }
+      const words = new SessionWords(this.stmt, tokens, this.limits)
       // Session-level matches rank after every single-row match, so they are only needed
       // while those leave room in the result.
       if (!phrase && tokens.length > 1 && found.size < maxGroups) {
-        for (const c of this.spreadCandidates(tokens, found, sessionsWith)) {
+        for (const c of this.spreadCandidates(found, maxGroups - found.size, words)) {
           candidates.push(c)
           found.add(c.sessionId)
         }
@@ -644,7 +875,7 @@ export class SearchService {
         tokens.some((t) => codePoints(t).length >= FUZZY_MIN_TOKEN_CHARS)
       ) {
         const seen = new Set(candidates.map((c) => c.rid))
-        const close = this.fuzzyCandidates(tokens, phrase ? undefined : { found, sessionsWith })
+        const close = this.fuzzyCandidates(tokens, phrase ? undefined : { found, words })
         candidates.push(...close.filter((c) => !seen.has(c.rid)))
       }
       const groups = this.group(candidates, maxGroups)
@@ -708,68 +939,85 @@ export class SearchService {
     }))
   }
 
-  /** For one token: every session that contains it, with its best row (by kind weight). */
-  private bestRowPerSession(token: string): Map<string, Candidate> {
-    const rows = this.stmt.bestRowPerSession.all(buildFtsQuery([token])) as SessionRowHit[]
-    return new Map(
-      rows.map((r) => [
-        r.session_id,
-        {
-          rid: r.rid,
-          sessionId: r.session_id,
-          kind: r.kind,
-          refId: r.ref_id,
-          score: KIND_WEIGHT[r.kind] ?? 1,
-          fuzzy: false,
-          tier: TIER_SESSION,
-        },
-      ]),
-    )
-  }
-
   /**
-   * Sessions that contain every token somewhere (title, any line, notes, action items, email)
-   * but were not found by the single-row pass, e.g. "acme" in the title and "pricing" said in
-   * a line. Hits are each token's best row in the session. Tokens are scanned rarest first
-   * (counting is index-only) and the scan stops as soon as no new session can come out of it.
+   * Up to `need` sessions that contain every token somewhere (title, any line, notes, action
+   * items, email) but were not found by the single-row pass, e.g. "acme" in the title and
+   * "pricing" said in a line. Hits are each token's best item in the session. The rarest word
+   * proposes sessions and each word that is cheap to map narrows them down (see SessionWords);
+   * the other words are looked for in each remaining session, most promising first (best hit
+   * so far, then recency), while the budget lasts.
    */
   private spreadCandidates(
-    tokens: string[],
     found: ReadonlySet<string>,
-    sessionsWith: SessionsWithToken,
+    need: number,
+    words: SessionWords,
   ): Candidate[] {
-    const order = tokens
-      .map((t, i) => ({ i, n: (this.stmt.count.get(buildFtsQuery([t])) as { c: number }).c }))
-      .sort((a, b) => a.n - b.n)
-    let common: string[] | null = null
-    for (const { i, n } of order) {
-      if (n === 0) return []
-      const rows = sessionsWith(i)
-      common = common ? common.filter((s) => rows.has(s)) : [...rows.keys()]
-      if (!common.some((s) => !found.has(s))) return []
+    const [rarest, ...others] = words.byRarity()
+    if (rarest === undefined || words.count(rarest) === 0) return []
+    const all = words.map(rarest)
+    const proposed = all ?? words.recent(rarest)
+    const mapped = all ? [all] : []
+    // Only its newest rows were read, so its best item (e.g. the title) is looked up instead.
+    const unmapped = all ? [] : [rarest]
+    let sessions = [...proposed.keys()].filter((s) => !found.has(s))
+    for (const i of others) {
+      if (!sessions.length || words.count(i) === 0) return []
+      const map = words.map(i)
+      if (!map) {
+        unmapped.push(i)
+        continue
+      }
+      mapped.push(map)
+      sessions = sessions.filter((s) => map.has(s))
     }
-    const out: Candidate[] = []
-    for (const sessionId of common ?? []) {
-      if (found.has(sessionId)) continue
+    const startedAt = this.startedAt(sessions)
+    const byRank = (a: SessionMatch, b: SessionMatch) =>
+      b.best - a.best || (startedAt.get(b.sessionId) ?? 0) - (startedAt.get(a.sessionId) ?? 0)
+    const ordered = sessions
+      .map((sessionId) => ({
+        sessionId,
+        best: Math.max(...[proposed, ...mapped].map((m) => m.get(sessionId)?.score ?? 0)),
+      }))
+      .sort(byRank)
+    const matches: (SessionMatch & { hits: Candidate[] })[] = []
+    for (const { sessionId } of ordered) {
+      // With every word mapped, this order is final; otherwise a scan can still find a better
+      // item (a common word in the title), so keep going while the budget lasts, then rank.
+      if (!unmapped.length && matches.length >= need) break
+      const rest = unmapped.length ? words.scan(sessionId, unmapped) : []
+      if (rest === EXHAUSTED) break
+      if (!rest) continue
       const hits = new Map<number, Candidate>()
-      tokens.forEach((_, i) => {
-        const c = sessionsWith(i).get(sessionId)
+      for (const c of [...mapped.map((m) => m.get(sessionId)), ...rest]) {
         if (c && !hits.has(c.rid)) hits.set(c.rid, c)
-      })
-      out.push(...[...hits.values()].sort((a, b) => b.score - a.score))
+      }
+      const list = [...hits.values()].sort((a, b) => b.score - a.score)
+      matches.push({ sessionId, best: list[0]?.score ?? 0, hits: list })
     }
-    return out
+    return matches
+      .sort(byRank)
+      .slice(0, need)
+      .flatMap((m) => m.hits)
+  }
+
+  private startedAt(ids: string[]): Map<string, number> {
+    if (!ids.length) return new Map()
+    const rows = this.stmt.startedAt.all(JSON.stringify(ids)) as {
+      id: string
+      started_at: number
+    }[]
+    return new Map(rows.map((r) => [r.id, r.started_at]))
   }
 
   /**
    * Typo-tolerant candidates from the trigram index, best first: rows in which every token
    * matches. With `spread`, also sessions whose rows match the tokens between them, where a
    * token may also be covered by an exact match elsewhere in the session (e.g. "entreprise"
-   * in one line and "sso" in another).
+   * in one line and "sso" in another), looked up within the SessionWords budget.
    */
   private fuzzyCandidates(
     tokens: string[],
-    spread?: { found: ReadonlySet<string>; sessionsWith: SessionsWithToken },
+    spread?: { found: ReadonlySet<string>; words: SessionWords },
   ): Candidate[] {
     const fuzzyTokens = tokens.filter((t) => codePoints(t).length >= 3)
     if (!fuzzyTokens.length) return []
@@ -809,18 +1057,18 @@ export class SearchService {
     for (const [sessionId, list] of partial) {
       if (rowLevel.has(sessionId)) continue
       const covered = new Set(list.flatMap((p) => p.matched))
-      const exact: Candidate[] = []
-      for (let i = 0; i < tokens.length && covered.size < tokens.length; i++) {
-        if (covered.has(i)) continue
-        const c = spread.sessionsWith(i).get(sessionId)
-        if (!c) break
-        covered.add(i)
-        exact.push(c)
-      }
-      if (covered.size < tokens.length) continue
+      const missing = tokens.map((_, i) => i).filter((i) => !covered.has(i))
+      const exact = spread.words.hitsIn(sessionId, missing)
+      if (exact === EXHAUSTED) break
+      if (!exact) continue
       const fuzzyHits = list.map((p) => p.cand).sort((a, b) => b.score - a.score)
       const rids = new Set(fuzzyHits.map((c) => c.rid))
-      out.push(...fuzzyHits, ...exact.filter((c) => !rids.has(c.rid)))
+      out.push(...fuzzyHits)
+      for (const c of exact) {
+        if (rids.has(c.rid)) continue
+        rids.add(c.rid)
+        out.push(c)
+      }
     }
     return out
   }
