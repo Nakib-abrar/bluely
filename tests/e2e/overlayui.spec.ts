@@ -5,7 +5,7 @@
  * IPC handlers from the main process (recording every call) and pushes the events main
  * would send. Set OVERLAYUI_SHOTS_DIR to also save screenshots of every state.
  */
-import { expect, test, type ElectronApplication, type Page } from '@playwright/test'
+import { expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { EventChannel, EventPayload } from '../../src/shared/ipc'
@@ -177,6 +177,9 @@ test.beforeAll(async () => {
   await fake(app, 'session:dismissConsent', null)
   await fake(app, 'session:setAutoSuggest', null)
   await fake(app, 'audio:stopped', null)
+  await fake(app, 'audio:channelStatus', null)
+  await fake(app, 'audio:warning', null)
+  await fake(app, 'sessions:get', null)
   await fake(app, 'modes:setActive', null)
   await fake(app, 'app:openMainWindow', null)
   await fake(app, 'app:openSettings', null)
@@ -248,6 +251,164 @@ test('live session: timer, meters, warnings and consent reminder', async () => {
   await overlay.getByRole('button', { name: 'Add key' }).click()
   await expect.poll(() => calls('app:openSettings')).toEqual([{ page: 'models' }])
   await emit('session:state', liveState())
+})
+
+/** Every warning at once, most important first (as the overlay orders them). */
+const ALL_WARNINGS: LiveSessionState['warnings'] = [
+  'no_key',
+  'mic_denied',
+  'mic_not_found',
+  'loopback_unavailable',
+  'stt_error_retrying',
+  'no_system_audio',
+  'mic_muted',
+  'use_headphones',
+]
+
+/**
+ * The consent note and its Copy button are wholly in view: not clipped by a scroll area and
+ * not pushed below the fold by warnings (spec §0.5).
+ */
+async function expectConsentInView(scope: Locator): Promise<void> {
+  const note = scope.locator('[data-warning="consent"]')
+  await expect(note).toContainText('Let others know this call is being transcribed')
+  await expect(note).toBeInViewport({ ratio: 1 })
+  await expect(note.getByRole('button', { name: 'Copy disclosure message' })).toBeInViewport({
+    ratio: 1,
+  })
+}
+
+/** Geometry of the expanded panel: answer list, warnings area and footer. */
+function panelLayout() {
+  return overlay.evaluate(() => {
+    const rect = (sel: string) => document.querySelector(sel)?.getBoundingClientRect() ?? null
+    const rows = document.querySelector<HTMLElement>('[data-warnings="panel"] [data-warnings-rows]')
+    return {
+      list: rect('[data-list="insights"]')?.height ?? 0,
+      warningsBottom: rect('[data-warnings="panel"]')?.bottom ?? Number.POSITIVE_INFINITY,
+      footerTop: rect('section[aria-label="Bluely live panel"] > footer')?.top ?? 0,
+      rowsScrollable: rows ? rows.scrollHeight > rows.clientHeight : false,
+    }
+  })
+}
+
+test('many warnings stay in a capped, scrollable area: answers, input and the consent note keep their room', async () => {
+  // A new call, so the consent reminder (dismissed during the earlier one) shows again.
+  await emit(
+    'session:state',
+    liveState({ sessionId: 'sess-e2e-many', showConsentReminder: true, warnings: ALL_WARNINGS }),
+  )
+  const box = overlay.locator('[data-warnings="panel"]')
+  await expect(box.locator('[data-warning="use_headphones"]')).toBeAttached()
+  await expectConsentInView(box)
+  // The most important warning is in view too; the rest scroll.
+  await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+  const layout = await panelLayout()
+  expect(layout.list).toBeGreaterThan(120)
+  expect(layout.warningsBottom).toBeLessThanOrEqual(layout.footerTop + 0.5)
+  expect(layout.rowsScrollable).toBe(true)
+  await expect(
+    overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
+  ).toBeInViewport()
+  // Only errors interrupt a screen reader; flapping warnings are polite.
+  await expect(box.locator('[data-warning="no_key"]')).toHaveAttribute('role', 'alert')
+  await expect(box.locator('[data-warning="stt_error_retrying"]')).toHaveAttribute('role', 'status')
+  await expect(box.locator('[data-warning="no_system_audio"]')).toHaveAttribute('role', 'status')
+  await expect(box.locator('[data-warning="mic_muted"]')).toHaveAttribute('role', 'status')
+  await shotBothThemes('01b-many-warnings')
+
+  // Collapsed, the strip under the pill keeps the note in view as well.
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  const strip = overlay.getByRole('region', { name: 'Session alerts' })
+  await overlay.getByRole('button', { name: 'Hide', exact: true }).click()
+  await expect(panel).toBeHidden()
+  await expect(strip.locator('[data-warning="use_headphones"]')).toBeAttached()
+  await expectConsentInView(strip)
+  await expect(strip.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+  await overlay.getByRole('button', { name: 'Show', exact: true }).click()
+  await expect(panel).toBeVisible()
+  await emit('session:state', liveState())
+})
+
+test('capture failures say why: denied mic, missing mic, or a generic failure with Retry', async () => {
+  await emit('session:state', liveState({ warnings: ['mic_denied'] }))
+  const denied = overlay.locator('[data-warning="mic_denied"]')
+  await expect(denied).toContainText('not allowed to use the microphone')
+  await expect(denied.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await expect(overlay.locator('[data-warning="mic_not_found"]')).toHaveCount(0)
+
+  await clearCalls()
+  await emit('session:state', liveState({ warnings: ['mic_not_found'] }))
+  await overlay
+    .locator('[data-warning="mic_not_found"]')
+    .getByRole('button', { name: 'Audio settings' })
+    .click()
+  await expect.poll(() => calls('app:openSettings')).toEqual([{ page: 'general' }])
+
+  // Voice detection failed to load: no "device missing" warning, a generic row instead.
+  await emit(
+    'session:state',
+    liveState({
+      audio: {
+        me: { state: 'error', error: 'Voice detection failed to load', code: 'unknown' },
+        them: { state: 'error', error: 'Voice detection failed to load', code: 'unknown' },
+      },
+    }),
+  )
+  const micFailed = overlay.locator('[data-warning="mic_failed"]')
+  await expect(micFailed).toContainText('Couldn’t start the microphone.')
+  // The raw (English) error is only a detail, behind a translated label.
+  await expect(micFailed).toHaveAttribute('title', 'Details: Voice detection failed to load')
+  await expect(overlay.locator('[data-warning="system_audio_failed"]')).toContainText(
+    'Couldn’t capture system audio.',
+  )
+  // Neither channel captures: the pill says so instead of an endless "Starting…".
+  await emit(
+    'session:state',
+    liveState({
+      status: 'starting',
+      audio: {
+        me: { state: 'error', error: 'x', code: 'unknown' },
+        them: { state: 'error', error: 'x', code: 'loopback_unavailable' },
+      },
+      warnings: ['loopback_unavailable'],
+    }),
+  )
+  await expect(overlay.locator('[data-status="no-audio"]')).toBeVisible()
+  await expect(overlay.locator('[aria-live="polite"]', { hasText: 'No audio' })).toHaveCount(1)
+  await expect(overlay.getByText('No audio', { exact: true }).last()).toBeVisible()
+  await expect(overlay.getByText('Starting…')).toHaveCount(0)
+  await expect(overlay.locator('[data-warning="system_audio_failed"]')).toHaveCount(0)
+  // Retry re-opens the microphone in the real capture.
+  await clearCalls()
+  await overlay
+    .locator('[data-warning="mic_failed"]')
+    .getByRole('button', { name: 'Retry' })
+    .click()
+  await expect
+    .poll(async () => (await calls('audio:channelStatus')) as { channel: string; state: string }[])
+    .toContainEqual(expect.objectContaining({ channel: 'me', state: 'starting' }))
+  await emit('session:state', liveState())
+  await expect(overlay.getByText(/^12:\d\d$/)).toBeVisible()
+  await expect(overlay.locator('[title="Listening · time in this session"]')).toBeVisible()
+})
+
+test('a microphone picked in Settings mid-call restarts only the Me channel', async () => {
+  await emit('session:state', liveState())
+  await expect.poll(() => calls('audio:channelStatus')).not.toEqual([]) // capture is running
+  await clearCalls()
+  await ctx.main.evaluate(() =>
+    window.bluely.invoke('settings:update', { patch: { audio: { micDeviceId: 'usb-headset' } } }),
+  )
+  const statuses = async () =>
+    (await calls('audio:channelStatus')) as { channel: string; state: string }[]
+  await expect
+    .poll(statuses)
+    .toContainEqual(expect.objectContaining({ channel: 'me', state: 'starting' }))
+  expect((await statuses()).filter((s) => s.channel === 'them')).toEqual([])
+  await ctx.main.evaluate(() =>
+    window.bluely.invoke('settings:update', { patch: { audio: { micDeviceId: null } } }),
+  )
 })
 
 test('answer cards stream in with labels, viewed screen, stats, cancel and retry', async () => {
@@ -324,6 +485,52 @@ test('answer cards stream in with labels, viewed screen, stats, cancel and retry
   await failed.getByRole('button', { name: 'Retry' }).click()
   await expect.poll(() => calls('ai:run')).toEqual([{ kind: 'followups' }])
   await expect(failed).toBeHidden()
+})
+
+test('switching tabs keeps the place the user was reading in Insights', async () => {
+  const list = overlay.locator('[data-list="insights"]')
+  const jump = overlay.getByRole('button', { name: 'Jump to latest' })
+  await list.hover()
+  await overlay.mouse.wheel(0, -600)
+  await expect(jump).toBeVisible()
+  await overlay.waitForTimeout(400) // let the wheel scroll settle
+  const readingAt = await list.evaluate((el) => el.scrollTop)
+  const bottom = await list.evaluate((el) => el.scrollHeight - el.clientHeight)
+  expect(bottom - readingAt).toBeGreaterThan(100)
+  await overlay.getByRole('tab', { name: 'Transcript' }).click()
+  await expect(overlay.locator('[data-list="transcript"]')).toBeVisible()
+  await overlay.getByRole('tab', { name: /Insights/ }).click()
+  await expect(list).toBeVisible()
+  await overlay.waitForTimeout(300)
+  await expect(jump).toBeVisible()
+  expect(Math.abs((await list.evaluate((el) => el.scrollTop)) - readingAt)).toBeLessThan(2)
+  await jump.click()
+  await expect(jump).toBeHidden()
+})
+
+test('keyboard focus rings in the action row are not clipped', async () => {
+  const row = overlay.getByRole('toolbar', { name: 'Quick actions' })
+  await row.getByRole('button', { name: 'Assist' }).focus()
+  await overlay.keyboard.press('Tab')
+  await expect(row.getByRole('button', { name: 'What should I say?' })).toBeFocused()
+  const ring = await overlay.evaluate(() => {
+    const btn = document.activeElement as HTMLElement
+    const cs = getComputedStyle(btn)
+    const reach = parseFloat(cs.outlineOffset) + parseFloat(cs.outlineWidth)
+    const r = btn.getBoundingClientRect()
+    const bar = (btn.closest('[role="toolbar"]') as HTMLElement).getBoundingClientRect()
+    return {
+      focusVisible: btn.matches(':focus-visible'),
+      style: cs.outlineStyle,
+      inside:
+        r.top - reach >= bar.top - 0.5 &&
+        r.bottom + reach <= bar.bottom + 0.5 &&
+        r.left - reach >= bar.left - 0.5 &&
+        r.right + reach <= bar.right + 0.5,
+    }
+  })
+  expect(ring).toEqual({ focusVisible: true, style: 'solid', inside: true })
+  await overlay.keyboard.press('Escape')
 })
 
 test('action row, Assist and typed questions send the right ai:run payloads', async () => {
@@ -508,8 +715,9 @@ test('transcript tab shows speaker-labelled live lines', async () => {
   await emit('transcript:remove', { id: 'l6', sessionId: SESSION })
   await expect(view.locator('[data-line-id="l6"]')).toHaveCount(0)
 
-  // A new answer while on Transcript shows an unseen badge on Insights.
-  await emit('ai:card', card({ id: 'c-badge', kind: 'recap', status: 'done', text: 'Recap.' }))
+  // A new auto-suggestion while on Transcript shows an unseen badge on Insights (answers the
+  // user asked for switch to Insights instead; see the global shortcut test).
+  await emit('ai:card', card({ id: 'c-badge', kind: 'auto', status: 'done', text: 'Recap.' }))
   await expect(overlay.getByRole('tab', { name: /Insights/ })).toContainText('1')
   await overlay.getByRole('tab', { name: /Insights/ }).click()
   await expect(overlay.locator('[data-card-id="c-badge"]')).toBeVisible()
@@ -585,6 +793,99 @@ test('collapse to the pill and expand again; window hugs the content', async () 
   await expect.poll(height).toBeGreaterThan(400)
 })
 
+/** The overlay window's current height (it hugs the painted content). */
+function overlayHeight(): Promise<number> {
+  return ctx.app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows().find((x) => x.getTitle() === 'Bluely overlay')
+    return w?.getBounds().height ?? 0
+  })
+}
+
+async function savedExpanded(): Promise<boolean | null> {
+  return ctx.main.evaluate(async () => {
+    const res = await window.bluely.invoke('settings:get', undefined)
+    return res.ok ? res.data.overlay.expanded : null
+  })
+}
+
+test('collapsed panel: session warnings and the consent reminder still show under the pill', async () => {
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  const strip = overlay.getByRole('region', { name: 'Session alerts' })
+  await overlay.getByRole('button', { name: 'Hide', exact: true }).click()
+  await expect(panel).toBeHidden()
+  // Remembered for the next call and the next launch.
+  await expect.poll(savedExpanded).toBe(false)
+  await expect(strip).toHaveCount(0)
+  await expect.poll(overlayHeight).toBeLessThan(90)
+
+  await emit(
+    'session:state',
+    liveState({
+      warnings: ['mic_not_found', 'stt_error_retrying'],
+      audio: {
+        me: { state: 'error', error: 'Requested device not found', code: 'mic_not_found' },
+        them: { state: 'listening', error: null },
+      },
+    }),
+  )
+  await expect(strip.locator('[data-warning="mic_not_found"]')).toContainText('No microphone found')
+  await expect(strip.locator('[data-warning="stt_error_retrying"]')).toBeVisible()
+  await expect(panel).toBeHidden()
+  // The window grows to fit the strip, so nothing is cut off.
+  const stripBottom = await strip.evaluate((el) => el.getBoundingClientRect().bottom)
+  await expect.poll(overlayHeight).toBeGreaterThanOrEqual(Math.ceil(stripBottom))
+
+  // A call starts (or the overlay restarts mid-call) with the panel collapsed in settings.
+  await fake(ctx.app, 'session:getState', liveState({ showConsentReminder: true }))
+  await overlay.reload()
+  await overlay.waitForLoadState('domcontentloaded')
+  await emit('session:state', liveState({ showConsentReminder: true }))
+  await expect(strip.locator('[data-warning="consent"]')).toContainText(
+    'Let others know this call is being transcribed',
+  )
+  await expect(panel).toBeHidden()
+  await shotBothThemes('07b-collapsed-consent')
+  await clearCalls()
+  await strip.getByRole('button', { name: 'Copy disclosure message' }).click()
+  await expect
+    .poll(() => calls('clipboard:writeText'))
+    .toEqual([{ text: "Heads up: I'm using an AI note-taker (Bluely) to transcribe this call." }])
+  await strip.getByRole('button', { name: 'Dismiss reminder' }).click()
+  await expect.poll(() => calls('session:dismissConsent')).toHaveLength(1)
+  await expect(strip).toHaveCount(0)
+  await expect.poll(overlayHeight).toBeLessThan(90)
+  await fake(ctx.app, 'session:getState', liveState({ status: 'idle', sessionId: null }))
+})
+
+test('a global shortcut answer opens the collapsed panel; auto-suggestions badge the pill', async () => {
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  await emit('session:state', liveState())
+  await expect(panel).toBeHidden()
+  // Auto-suggest while collapsed: the panel stays closed, the logo shows a badge.
+  await emit('ai:card', card({ id: 'c-auto-collapsed', kind: 'auto', status: 'done', text: 'Hi' }))
+  await expect(overlay.getByRole('button', { name: 'Show panel · 1 new' })).toBeVisible()
+  await expect(panel).toBeHidden()
+  // Ctrl+Shift+1 is handled in main, which only streams the card: it must still be seen.
+  await emit('ai:card', card({ id: 'c-global-say', kind: 'say', label: 'What should I say?' }))
+  await expect(panel).toBeVisible()
+  await expect(overlay.getByRole('tab', { name: /Insights/ })).toHaveAttribute(
+    'data-state',
+    'active',
+  )
+  await expect(overlay.locator('[data-card-id="c-global-say"]')).toBeVisible()
+  await expect.poll(savedExpanded).toBe(true)
+  await expect.poll(overlayHeight).toBeGreaterThan(400)
+  await emit('ai:done', { id: 'c-global-say', text: 'Say hello.', stats: STATS })
+  // On the Transcript tab, a requested answer switches to Insights (not just a badge).
+  await overlay.getByRole('tab', { name: 'Transcript' }).click()
+  await emit('ai:card', card({ id: 'c-global-recap', kind: 'recap', label: 'Recap' }))
+  await expect(overlay.getByRole('tab', { name: /Insights/ })).toHaveAttribute(
+    'data-state',
+    'active',
+  )
+  await emit('ai:done', { id: 'c-global-recap', text: '- Pricing agreed.', stats: STATS })
+})
+
 test('stop: Stop button calls session:stop and stopping stops capture', async () => {
   await clearCalls()
   await overlay.getByRole('button', { name: 'Stop session' }).click()
@@ -596,5 +897,74 @@ test('stop: Stop button calls session:stop and stopping stops capture', async ()
   // Stopping capture completes the stop handshake.
   await expect.poll(() => calls('audio:stopped')).toEqual([{ sessionId: SESSION }])
   await emit('session:state', liveState({ status: 'idle', sessionId: null, startedAt: null }))
+  await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
+})
+
+test('deleting the meeting in History removes its transcript and answers from the overlay', async () => {
+  // After the call the overlay still shows it (on purpose)…
+  await emit('transcript:line', line('l-after', 'them', 40, 'Our budget is confidential.'))
+  await emit('ai:card', card({ id: 'c-kept', kind: 'say', status: 'done', text: 'Kept answer.' }))
+  await expect(overlay.locator('[data-card-id="c-kept"]')).toBeVisible()
+  // …a rename (or new notes) changes nothing…
+  await fake(ctx.app, 'sessions:get', { id: SESSION, title: 'Renamed call' })
+  await emit('sessions:changed', { id: SESSION })
+  await expect.poll(() => calls('sessions:get')).toContainEqual({ id: SESSION })
+  await expect(overlay.locator('[data-card-id="c-kept"]')).toBeVisible()
+  // …but once it is deleted (Delete all, or this meeting), it disappears.
+  await fake(ctx.app, 'sessions:get', null)
+  await emit('sessions:changed', { id: null })
+  await expect(overlay.locator('[data-card-id]')).toHaveCount(0)
+  await overlay.getByRole('tab', { name: 'Transcript' }).click()
+  await expect(overlay.locator('[data-line-id]')).toHaveCount(0)
+  await expect(overlay.getByText('Our budget is confidential.')).toHaveCount(0)
+  await overlay.getByRole('tab', { name: /Insights/ }).click()
+})
+
+test('short screens (1366×768 at 125%, and the smallest panel): the consent note and the top warning stay in view', async () => {
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  const box = overlay.locator('[data-warnings="panel"]')
+  // Work-area heights → the panel height the overlay picks for them, and the room the answer
+  // list keeps while the consent note shows (the note and one full warning row come first).
+  const cases = [
+    { availHeight: 614, panelHeight: 366, minList: 60 },
+    { availHeight: 480, panelHeight: 320, minList: 16 },
+  ]
+  for (const { availHeight, panelHeight, minList } of cases) {
+    const fakeScreen = await overlay.addInitScript((h) => {
+      Object.defineProperty(Screen.prototype, 'availHeight', { configurable: true, get: () => h })
+    }, availHeight)
+    // A call starting on this screen: no key yet, the headphones tip and a flaky STT.
+    const state = liveState({
+      sessionId: `sess-e2e-short-${availHeight}`,
+      showConsentReminder: true,
+      warnings: ['no_key', 'stt_error_retrying', 'no_system_audio', 'use_headphones'],
+    })
+    await fake(ctx.app, 'session:getState', state)
+    await overlay.reload()
+    await overlay.waitForLoadState('domcontentloaded')
+    await emit('session:state', state)
+    await expect(panel).toBeVisible()
+    expect(await panel.evaluate((el) => (el as HTMLElement).offsetHeight)).toBe(panelHeight)
+
+    await expectConsentInView(box)
+    await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+    const layout = await panelLayout()
+    expect(layout.list).toBeGreaterThanOrEqual(minList)
+    expect(layout.warningsBottom).toBeLessThanOrEqual(layout.footerTop + 0.5)
+    expect(layout.rowsScrollable).toBe(true)
+    await expect(
+      overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
+    ).toBeInViewport({ ratio: 1 })
+    await shotBothThemes(`01c-short-screen-${availHeight}`)
+
+    // Once the note is dismissed, the warnings area shrinks back to its 40% cap.
+    await box.getByRole('button', { name: 'Dismiss reminder' }).click()
+    await expect(box.locator('[data-warning="consent"]')).toHaveCount(0)
+    await expect.poll(async () => (await panelLayout()).list).toBeGreaterThanOrEqual(60)
+    await fakeScreen.dispose()
+  }
+  await fake(ctx.app, 'session:getState', liveState({ status: 'idle', sessionId: null }))
+  await overlay.reload()
+  await overlay.waitForLoadState('domcontentloaded')
   await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
 })

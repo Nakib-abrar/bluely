@@ -341,9 +341,17 @@ test.describe('PulseAudio loopback', () => {
     test.info().annotations.push({ type: 'perf', description: `idle ${JSON.stringify(metrics)}` })
     expect(result.allSegments).toHaveLength(0)
     // The null-source "mic" delivers exact zeros: after 5 s that reads as a muted mic, and
-    // stop() clears the warning again.
+    // stop() clears the warning again. start() first clears every capture warning a previous
+    // renderer may have left set in main.
     console.log('[audio e2e] idle warnings:', JSON.stringify(result.warnings))
     expect(result.warnings).toEqual([
+      ...[
+        'mic_not_found',
+        'mic_denied',
+        'loopback_unavailable',
+        'no_system_audio',
+        'mic_muted',
+      ].map((code) => ({ code, active: false })),
       { code: 'mic_muted', active: true },
       { code: 'mic_muted', active: false },
     ])
@@ -365,7 +373,12 @@ test.describe('PulseAudio loopback', () => {
     expect(result.statuses).toContainEqual({ channel: 'them', state: 'listening', error: null })
     const them = result.allSegments.filter((s) => s.channel === 'them')
     expect(them.length).toBeGreaterThanOrEqual(1)
-    expect(Math.max(...them.map((s) => s.durationMs))).toBeGreaterThan(4000)
+    // The fixture is ~6.2 s of speech in two phrases with a ~350 ms pause between them, just
+    // under the VAD's 400 ms redemption window. Depending on frame alignment the phrases
+    // arrive as one ~6.4 s segment or as two ~3.2 s ones, so check that the speech was
+    // captured as whole phrases rather than where the VAD split it.
+    expect(them.reduce((sum, s) => sum + s.durationMs, 0)).toBeGreaterThan(5000)
+    expect(Math.max(...them.map((s) => s.durationMs))).toBeGreaterThan(2500)
     for (const s of them) {
       expect(s.wavValid).toBe(true)
       expect(s.durationMs).toBeLessThanOrEqual(12_000)

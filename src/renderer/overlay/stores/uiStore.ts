@@ -26,11 +26,13 @@ export interface UiStore {
   /** Include-screen toggles: one for Assist (empty input), one for typed questions. */
   screenForAssist: boolean
   screenForQuestions: boolean
-  /** Answers that arrived while the Transcript tab was showing. */
+  /** Answers that arrived while the panel was collapsed or the Transcript tab was showing. */
   unseen: number
   notice: OverlayNotice | null
   /** Warnings the user closed during this session (main may keep reporting them). */
   dismissedWarnings: SessionWarningCode[]
+  /** The consent reminder was closed for this session (hides it at once, before main confirms). */
+  consentDismissed: boolean
 
   setExpanded(expanded: boolean): void
   setTab(tab: OverlayTab): void
@@ -42,6 +44,7 @@ export interface UiStore {
   showNotice(message: string, settingsPage?: SettingsPage | null): void
   clearNotice(id?: number): void
   dismissWarning(code: SessionWarningCode): void
+  dismissConsent(): void
   resetSessionUi(): void
 }
 
@@ -58,8 +61,11 @@ export const useUi = create<UiStore>((set, get) => ({
   unseen: 0,
   notice: null,
   dismissedWarnings: [],
+  consentDismissed: false,
 
-  setExpanded: (expanded) => set({ expanded }),
+  // Opening the panel on Insights shows the answers, so they are no longer unseen.
+  setExpanded: (expanded) =>
+    set(expanded && get().tab === 'insights' ? { expanded, unseen: 0 } : { expanded }),
   setTab: (tab) => set(tab === 'insights' ? { tab, unseen: 0 } : { tab }),
   toggleDev: () => set({ devOpen: !get().devOpen }),
   setDraft: (draft) => set({ draft }),
@@ -71,7 +77,7 @@ export const useUi = create<UiStore>((set, get) => ({
         : { screenForQuestions: !get().screenForQuestions },
     ),
   noteNewCard: () => {
-    if (get().tab !== 'insights') set({ unseen: get().unseen + 1 })
+    if (get().tab !== 'insights' || !get().expanded) set({ unseen: get().unseen + 1 })
   },
   showNotice: (message, settingsPage = null) =>
     set({ notice: { id: ++noticeSeq, message, settingsPage } }),
@@ -84,7 +90,9 @@ export const useUi = create<UiStore>((set, get) => ({
       set({ dismissedWarnings: [...get().dismissedWarnings, code] })
     }
   },
-  resetSessionUi: () => set({ dismissedWarnings: [], unseen: 0, notice: null }),
+  dismissConsent: () => set({ consentDismissed: true }),
+  resetSessionUi: () =>
+    set({ dismissedWarnings: [], consentDismissed: false, unseen: 0, notice: null }),
 }))
 
 /** Restores the panel's expanded state and tab from settings (call once before first render). */

@@ -1,9 +1,16 @@
-import { describe, expect, it } from 'vitest'
-import type { AiCard, LatencyTrace, SpeedStats, TranscriptLine } from '@shared/types'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {
+  AiCard,
+  LatencyTrace,
+  SessionWarningCode,
+  SpeedStats,
+  TranscriptLine,
+} from '@shared/types'
 import {
   createLiveStore,
   IDLE_STATE,
   MAX_TRACES,
+  WARNING_HOLD_MS,
 } from '../../../src/renderer/overlay/stores/liveStore'
 
 /** A scheduler the test flushes by hand (stands in for requestAnimationFrame). */
@@ -243,5 +250,92 @@ describe('liveStore: latency traces', () => {
     store.getState().addTrace(trace('t5', 999))
     expect(store.getState().traces.find((t) => t.id === 't5')?.firstTokenAt).toBe(999)
     expect(store.getState().traces).toHaveLength(MAX_TRACES)
+  })
+})
+
+describe('liveStore: flapping warnings', () => {
+  const live = (store: ReturnType<typeof liveStore>['store'], warnings: SessionWarningCode[]) =>
+    store.getState().setState({ ...IDLE_STATE, status: 'live', sessionId: 's1', warnings })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const HOLD = WARNING_HOLD_MS.stt_error_retrying ?? 0
+  const shown = (store: ReturnType<typeof liveStore>['store']) =>
+    store.getState().shownWarnings.includes('stt_error_retrying')
+
+  it('shows intermittent STT errors as one steady row across many fail/success cycles', () => {
+    vi.useFakeTimers()
+    const { store } = liveStore()
+    // STT fails on every other segment: main raises the warning, clears it on the next
+    // success 2 s later, raises it again 2 s after that, ... for 40 s.
+    const timeline: string[] = []
+    for (let t = 0; t < 40_000; t += 500) {
+      if (t % 2000 === 0) {
+        live(store, (t / 2000) % 2 === 0 ? ['stt_error_retrying', 'mic_muted'] : ['mic_muted'])
+      }
+      timeline.push(shown(store) ? '#' : '.')
+      vi.advanceTimersByTime(500)
+    }
+    // Never unmounted in between (the old minimum-time-from-first-shown rule left 2 s gaps
+    // every ~8 s, re-announcing the row and making the list jump).
+    expect(timeline.join('')).toBe('#'.repeat(80))
+    // The last failure was at 36 s and main cleared it at 38 s; at 40 s it is still held.
+    expect(store.getState().shownWarnings).toContain('mic_muted')
+    vi.advanceTimersByTime(HOLD - 2000 - 1)
+    expect(shown(store)).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(store.getState().shownWarnings).toEqual(['mic_muted'])
+  })
+
+  it('counts the hold from when main cleared the warning, however long it was up', () => {
+    vi.useFakeTimers()
+    const { store } = liveStore()
+    live(store, ['stt_error_retrying'])
+    vi.advanceTimersByTime(20_000) // failing for a while
+    live(store, [])
+    expect(shown(store)).toBe(true)
+    vi.advanceTimersByTime(HOLD - 1)
+    expect(shown(store)).toBe(true)
+    // A failure inside the hold keeps it up and restarts the hold at its next clear.
+    live(store, ['stt_error_retrying'])
+    vi.advanceTimersByTime(100)
+    live(store, [])
+    vi.advanceTimersByTime(HOLD - 1)
+    expect(shown(store)).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(store.getState().shownWarnings).toEqual([])
+  })
+
+  it("a new session starts without the previous one's held warning", () => {
+    vi.useFakeTimers()
+    const { store } = liveStore()
+    live(store, ['stt_error_retrying'])
+    live(store, [])
+    store.getState().setState({ ...IDLE_STATE, status: 'live', sessionId: 's2', warnings: [] })
+    expect(store.getState().shownWarnings).toEqual([])
+  })
+
+  it('other warnings follow main immediately', () => {
+    const { store } = liveStore()
+    live(store, ['mic_muted'])
+    live(store, [])
+    expect(store.getState().shownWarnings).toEqual([])
+  })
+})
+
+describe('liveStore: forget a deleted meeting', () => {
+  it('drops the kept transcript and cards once the session is over', () => {
+    const { store } = liveStore()
+    store.getState().upsertLine(line('l1', 1))
+    store.getState().upsertCard(card('a', 1))
+    store.getState().forget('s1') // still live: kept
+    expect(store.getState().lines).toHaveLength(1)
+    store.getState().setState({ ...IDLE_STATE })
+    store.getState().forget('other')
+    expect(store.getState().cards).toHaveLength(1)
+    store.getState().forget('s1')
+    expect(store.getState()).toMatchObject({ sessionId: null, lines: [], cards: [] })
   })
 })

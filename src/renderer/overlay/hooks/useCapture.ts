@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import type { Channel } from '@shared/types'
 import { invoke } from '../../lib/ipc'
 import { useSettings } from '../../stores/settings'
 import { createCapture, type CaptureLike } from '../capture'
@@ -16,13 +17,44 @@ export function getCapture(): CaptureLike {
 }
 
 /**
+ * Applies audio settings changed during a call to the running capture: VAD sensitivity and
+ * max segment length take effect at once, and a different microphone restarts only the Me
+ * channel. Queued behind start/stop, so a change made while capture is starting still lands.
+ * Returns an unsubscribe.
+ */
+export function watchCaptureSettings(capture: CaptureLike): () => void {
+  return useSettings.subscribe((state, prev) => {
+    const next = state.settings
+    const before = prev.settings
+    if (
+      next.advanced.vadSensitivity !== before.advanced.vadSensitivity ||
+      next.advanced.maxSegmentSec !== before.advanced.maxSegmentSec
+    ) {
+      const { vadSensitivity, maxSegmentSec } = next.advanced
+      enqueue(async () => capture.update({ sensitivity: vadSensitivity, maxSegmentSec }), 'update')
+    }
+    if (next.audio.micDeviceId !== before.audio.micDeviceId) {
+      const micDeviceId = next.audio.micDeviceId
+      enqueue(() => capture.setMicDevice(micDeviceId), 'microphone switch')
+    }
+  })
+}
+
+/** Re-opens a failed channel (the warnings' Retry); a no-op when capture isn't running. */
+export function retryCapture(channel: Channel, capture: CaptureLike = getCapture()): void {
+  enqueue(() => capture.restartChannel(channel), 'retry')
+}
+
+/**
  * Starts capture when a session is starting/live and stops it when main says the session
  * is stopping (or is already over). Calls are serialized so a quick stop → start for a new
- * session never overlaps.
+ * session never overlaps. Audio settings changed mid-session are applied as they change.
  */
 export function useCaptureLifecycle(capture: CaptureLike = getCapture()): void {
   const status = useLive((s) => s.state.status)
   const sessionId = useLive((s) => s.state.sessionId)
+
+  useEffect(() => watchCaptureSettings(capture), [capture])
 
   useEffect(() => {
     const wantsCapture = (status === 'starting' || status === 'live') && !!sessionId
@@ -30,9 +62,10 @@ export function useCaptureLifecycle(capture: CaptureLike = getCapture()): void {
       if (startedFor === sessionId) return
       const previous = startedFor
       startedFor = sessionId
-      const { audio, advanced } = useSettings.getState().settings
       enqueue(async () => {
         if (previous && capture.running) await capture.stop()
+        // Read when the start actually runs, so settings changed meanwhile are used.
+        const { audio, advanced } = useSettings.getState().settings
         await capture.start({
           sessionId,
           micDeviceId: audio.micDeviceId,

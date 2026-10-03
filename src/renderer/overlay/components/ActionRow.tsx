@@ -40,8 +40,10 @@ const OVERFLOW: ActionDef[] = [
   { kind: 'who', icon: Users, label: 'actions.who', keybind: null },
 ]
 
+// The focus ring is drawn inside the button: the toolbar clips overflow (it must never wrap
+// or widen the panel), which would cut off an outside ring.
 const actionButton =
-  'no-drag inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[12.5px] font-medium whitespace-nowrap text-muted transition-colors duration-150 hover:bg-panel-3 hover:text-fg'
+  'no-drag inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[12.5px] font-medium whitespace-nowrap text-muted transition-colors duration-150 hover:bg-panel-3 hover:text-fg focus-visible:outline-offset-[-2px]'
 
 const MoreButton = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement>>(
   function MoreButton(props, ref) {

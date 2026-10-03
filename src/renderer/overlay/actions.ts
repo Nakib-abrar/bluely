@@ -41,17 +41,43 @@ function activeTier() {
   return useSettings.getState().settings.models.activeTier
 }
 
-async function run(req: RunRequest): Promise<void> {
-  const ui = useUi.getState()
-  ui.clearNotice()
-  // The user asked for something: show where the answer will appear.
+/** Longest typed question main accepts (the 'ai:run' contract in src/shared/ipc.ts). */
+export const MAX_QUESTION_CHARS = 4000
+
+/** Opens the panel on Insights, where answers appear. */
+export function showAnswers(): void {
   selectTab('insights')
-  if (!ui.expanded) void setExpanded(true)
+  if (!useUi.getState().expanded) void setExpanded(true)
+}
+
+/** Shows a friendly notice and returns true when a question is over the length limit. */
+function refuseTooLong(question: string): boolean {
+  if (question.length <= MAX_QUESTION_CHARS) return false
+  useUi.getState().showNotice(
+    t('overlay.notice.tooLong', {
+      count: question.length.toLocaleString(),
+      max: MAX_QUESTION_CHARS.toLocaleString(),
+    }),
+  )
+  return true
+}
+
+/** Sends a request; resolves false (after showing why) when main refused it. */
+async function request(req: RunRequest): Promise<boolean> {
+  useUi.getState().clearNotice()
+  // The user asked for something: show where the answer will appear.
+  showAnswers()
   try {
     await invoke('ai:run', req)
+    return true
   } catch (err) {
     reportError(err)
+    return false
   }
+}
+
+async function run(req: RunRequest): Promise<void> {
+  await request(req)
 }
 
 /** ✨ Assist: uses the Assist screen toggle and the active tier. */
@@ -63,11 +89,14 @@ export function runAssist(): Promise<void> {
   })
 }
 
-/** A typed question: Smart/Fast per the chip, screen per the question toggle. */
-export function askQuestion(question: string): Promise<void> {
+/**
+ * A typed question: Smart/Fast per the chip, screen per the question toggle. Resolves true
+ * once main accepted it; a question over the length limit is refused here with a notice.
+ */
+export async function askQuestion(question: string): Promise<boolean> {
   const q = question.trim()
-  if (!q) return Promise.resolve()
-  return run({
+  if (!q || refuseTooLong(q)) return false
+  return request({
     kind: 'ask',
     question: q,
     includeScreen: useUi.getState().screenForQuestions,
@@ -82,17 +111,62 @@ export function runAction(kind: ActionKind): Promise<void> {
 }
 
 /**
+ * Sends the typed draft as a question. The input clears at once; if the question can't be
+ * sent (too long, main refused it) the draft comes back so nothing the user typed or pasted
+ * is lost.
+ */
+export async function sendDraft(): Promise<void> {
+  const ui = useUi.getState()
+  const draft = ui.draft
+  const question = draft.trim()
+  // Too long: say so and keep the draft so the user can shorten it.
+  if (!question || refuseTooLong(question)) return
+  ui.setDraft('')
+  const sent = await askQuestion(draft)
+  // Don't overwrite something new the user started typing meanwhile.
+  if (!sent && useUi.getState().draft === '') useUi.getState().setDraft(draft)
+}
+
+/**
  * The input's primary action: a typed draft is sent as a question (and cleared),
  * an empty input runs Assist.
  */
 export function submitDraft(): Promise<void> {
-  const ui = useUi.getState()
-  const draft = ui.draft.trim()
-  if (draft) {
-    ui.setDraft('')
-    return askQuestion(draft)
-  }
+  if (useUi.getState().draft.trim()) return sendDraft()
   return runAssist()
+}
+
+/**
+ * A live answer card arrived from main. Answers the user asked for (buttons, keybinds, and
+ * the global Ctrl+Shift+1/2/3 shortcuts that main runs directly) must be visible, so the
+ * panel opens on Insights. Auto-suggestions never pop the panel open; they count as unseen.
+ */
+export function receiveLiveCard(card: AiCard): void {
+  if (card.scope !== 'live') return
+  const live = useLive.getState()
+  const isNew = !live.cards.some((c) => c.id === card.id)
+  live.upsertCard(card)
+  // Not new, or for another session (dropped by the store).
+  if (!isNew || !useLive.getState().cards.some((c) => c.id === card.id)) return
+  if (card.kind === 'auto') useUi.getState().noteNewCard()
+  else showAnswers()
+}
+
+/**
+ * Meetings changed in History (`id` null = many at once: Delete all, retention). If the
+ * meeting whose transcript and answers the overlay still shows no longer exists, drop them
+ * so a deleted call never reappears on the next Show overlay.
+ */
+export async function forgetIfDeleted(id: string | null): Promise<void> {
+  const kept = useLive.getState().sessionId
+  if (!kept || (id !== null && id !== kept)) return
+  try {
+    // A rename or new notes also say "changed": only a missing meeting was deleted.
+    const detail = await invoke('sessions:get', { id: kept })
+    if (detail === null) useLive.getState().forget(kept)
+  } catch {
+    // Can't tell; keep what the overlay shows.
+  }
 }
 
 /** Re-runs a failed card with the same kind, question, screen and tier. */

@@ -5,6 +5,7 @@ import type {
   AiErrorInfo,
   LatencyTrace,
   LiveSessionState,
+  SessionWarningCode,
   SpeedStats,
   TranscriptLine,
 } from '@shared/types'
@@ -12,6 +13,17 @@ import { nextFrame, type FrameScheduler } from '../lib/frame'
 
 /** How many dev latency traces the overlay keeps. */
 export const MAX_TRACES = 10
+
+/**
+ * Warnings main sets on every failure and clears on the next success. After main clears one
+ * the overlay keeps it up this much longer, counted from the latest clear, and a new failure
+ * inside that window simply keeps it up. Intermittent errors then show as one steady row
+ * instead of mounting and unmounting (the panel jumping and screen readers re-announcing the
+ * row) every few seconds; the row goes away once that long has passed without a failure.
+ */
+export const WARNING_HOLD_MS: Partial<Record<SessionWarningCode, number>> = {
+  stt_error_retrying: 5000,
+}
 
 export const IDLE_STATE: LiveSessionState = {
   status: 'idle',
@@ -35,8 +47,15 @@ export interface LiveStore {
   cards: AiCard[]
   /** Newest last, at most MAX_TRACES. */
   traces: LatencyTrace[]
+  /** Warnings to show: main's active ones plus held ones cleared less than their hold ago. */
+  shownWarnings: SessionWarningCode[]
 
   setState(state: LiveSessionState): void
+  /**
+   * Drops the transcript and cards kept for `sessionId` (the meeting was deleted), unless
+   * that session is still running.
+   */
+  forget(sessionId: string): void
   mergeTranscript(sessionId: string, lines: TranscriptLine[]): void
   upsertLine(line: TranscriptLine): void
   removeLine(id: string, sessionId: string): void
@@ -77,6 +96,12 @@ function patchCard(cards: AiCard[], id: string, patch: (c: AiCard) => AiCard): A
 const lineKey = (l: TranscriptLine) => l.startMs
 const cardKey = (c: AiCard) => c.createdAt
 
+const sameCodes = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i])
+
+/** Statuses during which the session's transcript is still being written. */
+const RUNNING: ReadonlySet<LiveSessionState['status']> = new Set(['starting', 'live', 'stopping'])
+
 /**
  * Creates the live-session store. The scheduler is injectable so unit tests can flush
  * streamed deltas deterministically.
@@ -85,12 +110,54 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
   /** Streamed text not yet applied to the cards, by card id. */
   const pending = new Map<string, string>()
   let scheduled = false
+  /**
+   * Warnings with a hold (WARNING_HOLD_MS) that are on screen: null while main has the
+   * warning active, otherwise when main last cleared it.
+   */
+  const heldClearedAt = new Map<SessionWarningCode, number | null>()
+  let holdTimer: ReturnType<typeof setTimeout> | null = null
 
   return create<LiveStore>((set, get) => {
+    /** Recomputes shownWarnings; re-runs itself when a held warning's time is up. */
+    const refreshWarnings = () => {
+      if (holdTimer) clearTimeout(holdTimer)
+      holdTimer = null
+      const active = get().state.warnings
+      const shown = [...active]
+      const now = Date.now()
+      let wakeIn = Number.POSITIVE_INFINITY
+      for (const [code, holdMs] of Object.entries(WARNING_HOLD_MS) as [
+        SessionWarningCode,
+        number,
+      ][]) {
+        if (active.includes(code)) {
+          // (Re)raised: on screen for as long as main keeps it, plus the hold after that.
+          heldClearedAt.set(code, null)
+          continue
+        }
+        if (!heldClearedAt.has(code)) continue
+        let clearedAt = heldClearedAt.get(code) ?? null
+        if (clearedAt == null) {
+          // Main just cleared it: the hold starts now, however long it had been up.
+          clearedAt = now
+          heldClearedAt.set(code, now)
+        }
+        const left = clearedAt + holdMs - now
+        if (left > 0) {
+          shown.push(code)
+          wakeIn = Math.min(wakeIn, left)
+        } else {
+          heldClearedAt.delete(code)
+        }
+      }
+      if (wakeIn !== Number.POSITIVE_INFINITY) holdTimer = setTimeout(refreshWarnings, wakeIn)
+      if (!sameCodes(shown, get().shownWarnings)) set({ shownWarnings: shown })
+    }
     /** Adopts a new session: transcript and cards from the previous one are dropped. */
     const adopt = (sessionId: string) => {
       if (get().sessionId === sessionId) return
       pending.clear()
+      heldClearedAt.clear()
       set({ sessionId, lines: [], cards: [] })
     }
     /** Live cards belong to the current session (or to none when main does not say). */
@@ -105,10 +172,20 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
       lines: [],
       cards: [],
       traces: [],
+      shownWarnings: [],
 
       setState(state) {
         if (state.sessionId) adopt(state.sessionId)
         set({ state })
+        refreshWarnings()
+      },
+
+      forget(sessionId) {
+        if (get().sessionId !== sessionId) return
+        const { state } = get()
+        if (state.sessionId === sessionId && RUNNING.has(state.status)) return
+        pending.clear()
+        set({ sessionId: null, lines: [], cards: [] })
       },
 
       mergeTranscript(sessionId, lines) {
