@@ -387,13 +387,18 @@ function stripMarks(text: string): string {
 /**
  * Highlighted snippet for an exact (FTS) hit, built from the stored text: words that start with
  * a query token are marked. Built in JS because FTS5 snippet() re-runs the MATCH for every hit,
- * which took seconds for short prefixes on a large history.
+ * which took seconds for short prefixes on a large history. For a `phrase` query (see
+ * buildPhraseQuery) only the adjacent runs that the phrase matched are marked: "Q&A" marks the
+ * Q and the A, not every word that starts with q or a.
  */
-export function prefixSnippet(rawText: string, tokens: string[]): string {
+export function prefixSnippet(rawText: string, tokens: string[], phrase = false): string {
   const text = stripMarks(rawText)
   const folded = tokens.map(foldForMatch)
   const words = wordsOf(text)
-  const marked = new Set<number>()
+  const marked = phrase ? phraseRuns(text, words, folded) : new Set<number>()
+  // A run the index matched but these word boundaries do not show (e.g. joined words) still
+  // gets a highlight: the prefix marking below.
+  if (marked.size) return buildSnippet(text, words, marked)
   words.forEach((w, i) => {
     const word = foldForMatch(text.slice(w.start, w.end))
     // FTS splits words at ZWNJ/ZWJ, so a token may also start inside a joined word.
@@ -401,6 +406,23 @@ export function prefixSnippet(rawText: string, tokens: string[]): string {
     if (folded.some((t) => parts.some((p) => p.startsWith(t)))) marked.add(i)
   })
   return buildSnippet(text, words, marked)
+}
+
+/**
+ * Indexes of the words in runs that match the phrase `tokens` (already folded): every token but
+ * the last a whole word, the last one a prefix, as in `"q" + "a"*`.
+ */
+function phraseRuns(text: string, words: Word[], tokens: string[]): Set<number> {
+  const folded = words.map((w) => foldForMatch(text.slice(w.start, w.end)))
+  const last = tokens.length - 1
+  const marked = new Set<number>()
+  for (let i = 0; i + last < folded.length; i++) {
+    const run = tokens.every((t, k) =>
+      k === last ? (folded[i + k] ?? '').startsWith(t) : folded[i + k] === t,
+    )
+    if (run) for (let k = 0; k <= last; k++) marked.add(i + k)
+  }
+  return marked
 }
 
 const SNIPPET_WORDS = 12
@@ -880,7 +902,7 @@ export class SearchService {
       }
       const groups = this.group(candidates, maxGroups)
       const fuzzy = groups.some((g) => g.hits.some((h) => h.fuzzy))
-      return { ...empty, fuzzy, groups: this.finalizeGroups(groups, tokens) }
+      return { ...empty, fuzzy, groups: this.finalizeGroups(groups, tokens, phrase) }
     } catch (err) {
       this.log?.warn('Search failed', err)
       return empty
@@ -1061,10 +1083,19 @@ export class SearchService {
       const exact = spread.words.hitsIn(sessionId, missing)
       if (exact === EXHAUSTED) break
       if (!exact) continue
-      const fuzzyHits = list.map((p) => p.cand).sort((a, b) => b.score - a.score)
-      const rids = new Set(fuzzyHits.map((c) => c.rid))
-      out.push(...fuzzyHits)
-      for (const c of exact) {
+      // Only a meeting's first few hits are shown, so they should explain every word: one
+      // typo line per word it covers (best first), the exact hits of the other words, then the
+      // remaining typo lines.
+      const first: Candidate[] = []
+      const rest: Candidate[] = []
+      const shown = new Set<number>()
+      for (const p of [...list].sort((a, b) => b.cand.score - a.cand.score)) {
+        const adds = p.matched.some((i) => !shown.has(i))
+        for (const i of p.matched) shown.add(i)
+        ;(adds ? first : rest).push(p.cand)
+      }
+      const rids = new Set<number>()
+      for (const c of [...first, ...exact, ...rest]) {
         if (rids.has(c.rid)) continue
         rids.add(c.rid)
         out.push(c)
@@ -1104,7 +1135,11 @@ export class SearchService {
     return groups.slice(0, maxGroups)
   }
 
-  private finalizeGroups(groups: CandidateGroup[], tokens: string[]): SearchGroup[] {
+  private finalizeGroups(
+    groups: CandidateGroup[],
+    tokens: string[],
+    phrase: boolean,
+  ): SearchGroup[] {
     const out: SearchGroup[] = []
     for (const g of groups) {
       if (!g.session) continue
@@ -1114,7 +1149,7 @@ export class SearchService {
           sessionId: h.sessionId,
           kind: h.kind,
           refId: h.refId,
-          snippet: (h.fuzzy ? h.snippet : this.exactSnippet(h.rid, tokens)) ?? '',
+          snippet: (h.fuzzy ? h.snippet : this.exactSnippet(h.rid, tokens, phrase)) ?? '',
           score: h.score,
         })),
       })
@@ -1123,9 +1158,9 @@ export class SearchService {
   }
 
   /** See {@link prefixSnippet}; the text comes from the index row (one rowid lookup). */
-  private exactSnippet(rid: number, tokens: string[]): string {
+  private exactSnippet(rid: number, tokens: string[], phrase: boolean): string {
     const row = this.stmt.indexedText.get(rid) as { text: string } | undefined
-    return row ? prefixSnippet(row.text, tokens) : ''
+    return row ? prefixSnippet(row.text, tokens, phrase) : ''
   }
 
   private loadSessions(ids: string[]): Map<string, SessionSummary> {

@@ -10,6 +10,7 @@ import {
 } from 'electron'
 import { BUILTIN_MODES, DEFAULT_MODE_ID } from '@shared/builtinModes'
 import type { SessionSummary } from '@shared/types'
+import { withoutPartError } from '../ai/postCallErrors'
 import type { CoreContext } from '../context'
 import { deleteAllData } from '../data/deleteAll'
 import {
@@ -118,9 +119,18 @@ export function wireHistory(ctx: CoreContext): HistoryFeature {
   handle('sessions:updateEmail', ({ id, subject, body }) => {
     const email = { subject, body }
     // summary_json is what the UI shows; the post_email row is what search indexes.
-    // emailEdited keeps "Regenerate" from overwriting the user's edits.
+    // emailEdited keeps "Regenerate" from overwriting the user's edits. An email the user writes
+    // after the email part failed resolves that failure: its error goes, so the page stops
+    // reporting it and offering a Retry that would generate over what they wrote. A blank one
+    // (typed, then cleared) resolves nothing, so that Retry stays.
     db.transaction(() => {
-      sessions.updateSummaryJson(id, { email, emailEdited: true })
+      const { postCallError } = sessions.getSummaryJson(id)
+      const written = !!(subject.trim() || body.trim())
+      sessions.updateSummaryJson(id, {
+        email,
+        emailEdited: true,
+        postCallError: written ? withoutPartError(postCallError, 'email') : postCallError,
+      })
       aiMessages.upsertPostCall(id, 'post_email', emailToMarkdown(email))
     })()
     changed(id)

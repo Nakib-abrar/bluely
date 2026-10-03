@@ -410,6 +410,21 @@ describe('SearchService.query', () => {
     expect(qa.groups[0]?.hits.map((h) => h.kind)).toEqual(['title'])
   })
 
+  it('highlights only the adjacent run of a one-letter phrase ("Q&A"), not every q-/a-word', () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'qa',
+      title: 'Quick answers: Q&A about the API',
+      startedAt: NOW - DAY,
+      lines: [['them', 'quiet afternoon, nothing to ask']],
+    })
+    const qa = r.search.query('Q&A')
+    expect(sessionIds(qa)).toEqual(['qa'])
+    expect(qa.groups[0]?.hits.map((h) => h.snippet)).toEqual([
+      `Quick answers: ${S}Q${E}&${S}A${E} about the API`,
+    ])
+  })
+
   it('runs one MATCH for a one-word query and never re-runs MATCH per hit', () => {
     // A one-letter prefix has no prefix index; re-running MATCH for every hit to build its
     // snippet (snippet() with rowid IN json_each(…)) froze the main process for seconds on a
@@ -532,6 +547,29 @@ describe('SearchService.query', () => {
     }
     for (const sql of matchStatements(statements)) expect(sql).not.toMatch(/\bGROUP BY\b/)
     expect(read.rows).toBeLessThanOrEqual(50 + 100 + 30)
+  })
+
+  it('shows a hit for every word of a typo match spread over a meeting', () => {
+    const r = makeRepos()
+    seedSession(r, {
+      id: 'zorb',
+      startedAt: NOW - DAY,
+      lines: [
+        ['them', 'zorblux report one'],
+        ['them', 'zorblux report two'],
+        ['me', 'zorblux report five'],
+        ['them', 'zorblux report four'],
+        ['me', 'the plan is ready'],
+      ],
+    })
+    // "zorblax" is a typo of zorblux (four lines); "th" only in another line. At most 3 hits
+    // are shown: the best typo line, then the line that has the other word, then more typos.
+    const res = r.search.query('zorblax th')
+    expect(res.fuzzy).toBe(true)
+    expect(sessionIds(res)).toEqual(['zorb'])
+    const hits = res.groups[0]?.hits ?? []
+    expect(hits).toHaveLength(3)
+    expect(markedWords(hits)).toEqual(['zorblux', 'the', 'zorblux'])
   })
 
   it('finds Bangla text whose stored form was not NFC (precomposed য়)', () => {
