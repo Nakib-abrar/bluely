@@ -396,6 +396,22 @@ export function isReserved(acc: string): boolean {
   return RESERVED_ACCELERATORS.includes(normalizeAccelerator(acc))
 }
 
+/**
+ * The accelerator a keybind really uses (normalized; the modifier prefix for arrow families), or
+ * null when the bind does nothing: disabled, unusable for its kind (malformed, no modifier, Shift
+ * only) or reserved. Main registers only these and reports the rest as "Invalid shortcut", so
+ * everything else that reacts to binds (the overlay's local keys) must go through this too:
+ * otherwise a hand-edited Shift+S or Ctrl+C would still fire there.
+ */
+export function usableAccelerator(id: KeybindId, value: string | null | undefined): string | null {
+  if (value == null || value.trim() === '') return null
+  const def = getKeybindDef(id)
+  if (!isValidAccelerator(value, def.kind)) return null
+  const normalized = normalizeAccelerator(value)
+  if (def.kind === 'single' && isReserved(normalized)) return null
+  return normalized
+}
+
 export interface KeyEventLike {
   key: string
   code?: string

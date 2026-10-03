@@ -5,10 +5,10 @@ import {
   ALT_ENTER_PRESET,
   KEYBIND_DEFS,
   getKeybindDef,
-  isValidAccelerator,
   keybindDisplay,
   keyEventToAccelerator,
   normalizeAccelerator,
+  usableAccelerator,
   type KeybindId,
   type KeybindMap,
 } from '@shared/keybinds'
@@ -186,7 +186,7 @@ export function KeybindsPage() {
           const status = statuses.find((s) => s.id === def.id)
           const label = labelOf(def.id)
           const isCapturing = capturing === def.id
-          const valid = value != null && isValidAccelerator(value, def.kind)
+          const valid = usableAccelerator(def.id, value) !== null
           const badge = keybindBadge(def, value, status)
           const message = messages[def.id]
           return (

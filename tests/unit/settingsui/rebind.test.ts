@@ -170,4 +170,16 @@ describe('keybindBadge', () => {
     })
     expect(keybindBadge(recap, 'CommandOrControl+Shift+3', undefined)).toBeNull()
   })
+
+  it('marks a hand-edited reserved value (Ctrl+C) invalid before main reports it', () => {
+    const clear = getKeybindDef('clearChat')
+    expect(keybindBadge(clear, 'Ctrl+C', undefined)).toEqual({
+      tone: 'danger',
+      text: 'Invalid shortcut',
+    })
+    expect(keybindBadge(recap, 'alt+f4', undefined)).toEqual({
+      tone: 'danger',
+      text: 'Invalid shortcut',
+    })
+  })
 })

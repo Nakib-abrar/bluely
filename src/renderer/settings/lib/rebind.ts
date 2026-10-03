@@ -9,8 +9,8 @@ import {
   findConflicts,
   getKeybindDef,
   isReserved,
-  isValidAccelerator,
   normalizeAccelerator,
+  usableAccelerator,
   type AcceleratorProblem,
   type KeybindDef,
   type KeybindId,
@@ -125,7 +125,9 @@ export function keybindBadge(
   status: KeybindStatus | undefined,
 ): KeybindBadge | null {
   if (value == null) return { tone: 'neutral', text: t('settings.keybinds.disabled') }
-  if (!isValidAccelerator(value, def.kind)) {
+  // Unusable values (including reserved ones like Ctrl+C) do nothing anywhere: say so before
+  // main's status arrives.
+  if (usableAccelerator(def.id, value) === null) {
     return { tone: 'danger', text: t('settings.keybinds.invalid') }
   }
   // A status for another accelerator is stale (main has not applied the new value yet).

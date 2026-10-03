@@ -18,9 +18,8 @@ import {
   KEYBIND_DEFS,
   expandAccelerator,
   globalsShadowedByLocals,
-  isReserved,
-  isValidAccelerator,
   normalizeAccelerator,
+  usableAccelerator,
   type KeybindDef,
   type KeybindId,
   type KeybindMap,
@@ -188,10 +187,9 @@ export class ShortcutManager {
       if (value === null || value.trim() === '') {
         return { def, value: null, state: 'disabled', bindings: [] }
       }
-      if (!isValidAccelerator(value, def.kind) || (def.kind === 'single' && isReserved(value))) {
-        return { def, value, state: 'invalid', bindings: [] }
-      }
-      const normalized = normalizeAccelerator(value)
+      // The same rule the overlay's local keys and Settings use (invalid, Shift only, reserved).
+      const normalized = usableAccelerator(def.id, value)
+      if (normalized === null) return { def, value, state: 'invalid', bindings: [] }
       return {
         def,
         value: normalized,

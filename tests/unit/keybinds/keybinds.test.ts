@@ -12,6 +12,7 @@ import {
   keyEventToAccelerator,
   keybindDisplay,
   normalizeAccelerator,
+  usableAccelerator,
 } from '@shared/keybinds'
 
 const ev = (
@@ -132,6 +133,35 @@ describe('keybinds', () => {
     expect(keyEventToAccelerator(ev('Control', 'ControlLeft', { ctrl: true }), 'single')).toBeNull()
     expect(keyEventToAccelerator(ev('ArrowUp', 'ArrowUp', { alt: true }), 'arrows4')).toBe('Alt')
     expect(keyEventToAccelerator(ev('a', 'KeyA'), 'arrows4')).toBeNull()
+  })
+
+  it('usableAccelerator: what a bind really fires on (null when it does nothing)', () => {
+    // Every default is usable as-is.
+    for (const def of KEYBIND_DEFS) {
+      expect(usableAccelerator(def.id, def.defaultAccelerator), def.id).toBe(
+        normalizeAccelerator(def.defaultAccelerator),
+      )
+    }
+    expect(usableAccelerator('clearChat', 'ctrl+r')).toBe('CommandOrControl+R')
+    expect(usableAccelerator('scrollChat', 'alt+ctrl')).toBe('CommandOrControl+Alt')
+    expect(usableAccelerator('devPanel', 'F9')).toBe('F9')
+    // Disabled.
+    expect(usableAccelerator('clearChat', null)).toBeNull()
+    expect(usableAccelerator('clearChat', undefined)).toBeNull()
+    expect(usableAccelerator('clearChat', '  ')).toBeNull()
+    // Hand-edited values Settings refuses: local binds must not fire on them either.
+    expect(usableAccelerator('clearChat', 'Shift+R')).toBeNull() // capital R while typing
+    expect(usableAccelerator('askAssist', 'Shift+Enter')).toBeNull() // new line while typing
+    expect(usableAccelerator('scrollChat', 'Shift')).toBeNull() // text selection
+    expect(usableAccelerator('devPanel', 'D')).toBeNull()
+    expect(usableAccelerator('devPanel', 'Ctrl+Nope')).toBeNull()
+    // Reserved combos (copy, select all...) never become binds, local or global.
+    expect(usableAccelerator('clearChat', 'Ctrl+C')).toBeNull()
+    expect(usableAccelerator('devPanel', 'ctrl+a')).toBeNull()
+    expect(usableAccelerator('actionRecap', 'Alt+F4')).toBeNull()
+    // Wrong shape for the kind.
+    expect(usableAccelerator('moveOverlay', 'Ctrl+Up')).toBeNull()
+    expect(usableAccelerator('clearChat', 'Ctrl')).toBeNull()
   })
 
   it('flags reserved combos and formats keycaps', () => {

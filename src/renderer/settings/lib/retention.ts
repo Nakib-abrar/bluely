@@ -27,12 +27,14 @@ export function retentionCutoff(days: RetentionDays, nowMs: number): number {
 /**
  * Counts the meetings main's retention would delete for `cutoff`: every session that started
  * before it and is not the live one. Pages through 'sessions:list' (newest first, started_at <
- * before), so the count is exact however long the history is.
+ * before), so the count is exact however long the history is. Returns null when it cannot be
+ * exact: more than a full page of sessions share one start time, so paging by time cannot reach
+ * the rest of them (the caller then asks without a number rather than with a low one).
  */
 export async function countSessionsBefore(
   cutoff: number,
   list: (before: number, limit: number) => Promise<SessionSummary[]>,
-): Promise<number> {
+): Promise<number | null> {
   const seen = new Set<string>()
   let count = 0
   let before = cutoff
@@ -46,7 +48,9 @@ export async function countSessionsBefore(
       if (s.startedAt < cutoff && s.status !== 'active') count++
     }
     const last = page[page.length - 1]
-    if (!last || page.length < SESSIONS_PAGE || added === 0) return count
+    if (!last || page.length < SESSIONS_PAGE) return count
+    // A full page with nothing new: it is all one start time and more may follow it unseen.
+    if (added === 0) return null
     // +1 re-reads sessions that share the last start time (the list is strictly "before");
     // `seen` skips the ones already counted.
     before = Math.min(cutoff, last.startedAt + 1)

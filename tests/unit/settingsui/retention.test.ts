@@ -67,6 +67,25 @@ describe('retention preview', () => {
     expect(list.mock.calls.length).toBeGreaterThanOrEqual(3)
   })
 
+  it('stays exact when a run of equal start times crosses a page boundary', async () => {
+    const cutoff = retentionCutoff(30, NOW)
+    const old: SessionSummary[] = []
+    for (let i = 0; i < 400; i++) old.push(session(`a${i}`, cutoff - 1000 - i))
+    // 300 imported meetings with one start time, straddling the first page's end.
+    for (let i = 0; i < 300; i++) old.push(session(`b${i}`, cutoff - 5000))
+    for (let i = 0; i < 50; i++) old.push(session(`c${i}`, cutoff - 9000 - i))
+    expect(await countSessionsBefore(cutoff, fakeList(old))).toBe(750)
+  })
+
+  it('reports an unknown count rather than a low one when a page is all one start time', async () => {
+    const cutoff = retentionCutoff(30, NOW)
+    const old: SessionSummary[] = []
+    // More meetings share one millisecond than a page holds: paging by time cannot see them all.
+    for (let i = 0; i < SESSIONS_PAGE + 100; i++) old.push(session(`same${i}`, cutoff - 5000))
+    for (let i = 0; i < 20; i++) old.push(session(`older${i}`, cutoff - 9000 - i))
+    expect(await countSessionsBefore(cutoff, fakeList(old))).toBeNull()
+  })
+
   it('returns 0 when nothing is old enough', async () => {
     const list = fakeList([session('recent', NOW - DAY_MS)])
     expect(await countSessionsBefore(retentionCutoff(30, NOW), list)).toBe(0)
