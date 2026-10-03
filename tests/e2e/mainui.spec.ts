@@ -365,9 +365,16 @@ async function installFakes(app: ElectronApplication, state: FakeState): Promise
     })
     replace('app:getNotices', () => g.__fake.notices)
     replace('app:dismissNotice', (req) => {
+      // A test can make main publish right before it handles the dismissal (see the notice
+      // dismiss test). Unlike main, the fake does not publish the new list afterwards: the
+      // window must not rely on that to drop a notice it was told to dismiss.
+      ;(globalThis as unknown as { __beforeDismiss?: () => void }).__beforeDismiss?.()
       g.__fake.notices = g.__fake.notices.filter((n) => n.id !== req['id'])
     })
-    replace('updater:install', () => undefined)
+    replace('updater:install', () => {
+      // When it was asked to install: main refuses while a call runs or its notes are written.
+      g.__calls.push({ ch: 'updater:install:status', req: g.__fake.live.status })
+    })
     replace('sessions:list', (req) => {
       const before = typeof req['before'] === 'number' ? req['before'] : Infinity
       const limit = typeof req['limit'] === 'number' ? req['limit'] : 50
@@ -715,9 +722,58 @@ test('header subtitle names the model that answers (Mode override, Fast/Smart ti
 })
 
 test('notice dismiss calls app:dismissNotice', async () => {
+  // Main publishes its notice list whenever something changes, e.g. when the startup model
+  // validation finishes. Make that happen right as the user dismisses the update notice: the
+  // list main computed just before it handled the dismissal still has that notice (and adds a
+  // model notice). It reaches the window after the click; the dismissed notice must stay gone.
+  await ctx.app.evaluate(({ BrowserWindow }) => {
+    const g = globalThis as unknown as {
+      __fake: { notices: Notice[] }
+      __beforeDismiss?: () => void
+    }
+    g.__beforeDismiss = () => {
+      g.__beforeDismiss = undefined
+      g.__fake.notices = [
+        ...g.__fake.notices,
+        {
+          id: 'model-fast-x',
+          kind: 'info',
+          title: 'Fast model replaced',
+          body: 'The default Fast model is not available any more.',
+          action: null,
+          dismissible: true,
+        },
+      ]
+      for (const w of BrowserWindow.getAllWindows()) w.webContents.send('app:notices', [])
+    }
+  })
+  // Records whether the notice comes back at any moment after the click took it away (a later
+  // publish from main would hide it again, so checking only the end state could miss it).
+  await page.evaluate(() => {
+    const w = window as unknown as { __noticeCameBack?: boolean }
+    const shown = () => !!document.body.textContent?.includes('Bluely 0.2.0 is ready to install')
+    let gone = false
+    w.__noticeCameBack = false
+    new MutationObserver(() => {
+      if (!shown()) gone = true
+      else if (gone) w.__noticeCameBack = true
+    }).observe(document.body, { childList: true, subtree: true, characterData: true })
+  })
   await page.getByRole('button', { name: 'Dismiss' }).click()
+  // The racing list has been shown (the model notice arrived with it)…
+  await expect(page.getByText('Fast model replaced')).toBeVisible()
+  // …without bringing back the notice that was dismissed, not even for a moment.
   await expect(page.getByText('Bluely 0.2.0 is ready to install')).toHaveCount(0)
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __noticeCameBack?: boolean }).__noticeCameBack,
+    ),
+  ).toBe(false)
   expect((await calls(ctx.app, 'app:dismissNotice')).at(-1)?.req).toEqual({ id: 'update-0.2.0' })
+  // Dismiss the model notice too, so the pages below look as before.
+  await page.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(page.getByText('Fast model replaced')).toHaveCount(0)
+  expect((await calls(ctx.app, 'app:dismissNotice')).at(-1)?.req).toEqual({ id: 'model-fast-x' })
 })
 
 test('search shows grouped, highlighted hits and opens the right tab', async () => {
@@ -1161,39 +1217,69 @@ test('live session: Start → Stop with timer → Generating notes', async () =>
   await expect(page.getByTestId('start-processing')).toHaveCount(0)
 })
 
-test('"Restart & update" asks first while a call is live or notes are being written', async () => {
-  await patchFake(ctx.app, {
-    notices: NOTICES,
-    live: { ...IDLE, status: 'live', sessionId: 'live-3', startedAt: Date.now() - 60_000 },
+test('"Restart & update" asks first, stops the call and installs only once its notes are written', async () => {
+  const live = (status: LiveSessionState['status']): LiveSessionState => ({
+    ...IDLE,
+    status,
+    sessionId: 'live-3',
+    startedAt: Date.now() - 60_000,
   })
+  await patchFake(ctx.app, { notices: NOTICES, live: live('live') })
   await page.reload()
   const install = page.getByRole('button', { name: 'Restart & update' })
+  // The session status at each updater:install (main refuses unless it is idle).
+  const installs = async () =>
+    (await calls(ctx.app, 'updater:install:status')).map((c) => c.req as string)
+  const stops = async () => (await calls(ctx.app, 'session:stop')).length
+  /** The notes of the stopped call are done: main goes idle. */
+  const notesWritten = async () => {
+    await patchFake(ctx.app, { live: IDLE })
+    await push(ctx.app, 'session:state', IDLE)
+  }
+  const stopsBefore = await stops()
+
+  // A live call: ask first; Cancel changes nothing.
   await install.click()
   const dialog = page.getByRole('dialog', { name: 'Stop the call and restart?' })
   await expect(dialog).toBeVisible()
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toHaveCount(0)
-  expect(await calls(ctx.app, 'updater:install')).toHaveLength(0)
+  expect(await stops()).toBe(stopsBefore)
+  expect(await installs()).toEqual([])
 
+  // Confirmed: the call stops (the fake then writes its notes), and Bluely installs only once
+  // the notes are written, so quitting never abandons them.
   await install.click()
   await dialog.getByRole('button', { name: 'Stop call and restart' }).click()
-  await expect.poll(async () => (await calls(ctx.app, 'updater:install')).length).toBe(1)
-  const order = await ctx.app.evaluate(() => {
-    const g = globalThis as unknown as { __calls: { ch: string }[] }
-    return g.__calls.map((c) => c.ch).filter((c) => c === 'session:stop' || c === 'updater:install')
-  })
-  expect(order.slice(-2)).toEqual(['session:stop', 'updater:install'])
+  await expect.poll(stops).toBe(stopsBefore + 1)
+  await expect(dialog).toBeVisible()
+  await notesWritten()
+  await expect.poll(installs).toEqual(['idle'])
+  await expect(dialog).toHaveCount(0)
 
-  // The fake stop left the session generating notes: ask again, with the notes wording.
+  // A call that is already stopping: its stop is awaited as well.
+  await patchFake(ctx.app, { live: live('stopping') })
+  await push(ctx.app, 'session:state', live('stopping'))
   await install.click()
-  const notesDialog = page.getByRole('dialog', { name: 'Restart while notes are being written?' })
+  await dialog.getByRole('button', { name: 'Stop call and restart' }).click()
+  await expect.poll(stops).toBe(stopsBefore + 2)
+  await notesWritten()
+  await expect.poll(installs).toEqual(['idle', 'idle'])
+
+  // Notes being written: say Bluely restarts once they are done. Cancel while it waits means
+  // no restart after all.
+  await patchFake(ctx.app, { live: live('processing') })
+  await install.click()
+  const notesDialog = page.getByRole('dialog', { name: 'Restart once the notes are written?' })
   await expect(notesDialog).toBeVisible()
+  await notesDialog.getByRole('button', { name: 'Restart when done' }).click()
   await notesDialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(notesDialog).toHaveCount(0)
+  await notesWritten()
 
-  // Idle: install right away.
-  await patchFake(ctx.app, { live: IDLE })
+  // Idle: install right away (and nothing else installed in between).
   await install.click()
-  await expect.poll(async () => (await calls(ctx.app, 'updater:install')).length).toBe(2)
+  await expect.poll(installs).toEqual(['idle', 'idle', 'idle'])
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
 

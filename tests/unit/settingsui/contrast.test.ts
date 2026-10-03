@@ -63,3 +63,68 @@ describe('theme text contrast', () => {
     expect(contrast('#71717a', '#1e1e21')).toBeCloseTo(3.44, 2)
   })
 })
+
+type Rgb = [number, number, number]
+
+function rgba(selector: string, name: string): [number, number, number, number] {
+  const start = CSS.indexOf(`${selector} {`)
+  const body = CSS.slice(start, CSS.indexOf('}', start))
+  const m = body.match(
+    new RegExp(`--${name}:\\s*rgba\\((\\d+),\\s*(\\d+),\\s*(\\d+),\\s*([\\d.]+)\\)\\s*;`),
+  )
+  if (!m) throw new Error(`No rgba --${name} in ${selector}`)
+  return [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])]
+}
+
+/** A translucent colour painted over an opaque one. */
+function over([r, g, b, a]: [number, number, number, number], [R, G, B]: Rgb): Rgb {
+  return [r * a + R * (1 - a), g * a + G * (1 - a), b * a + B * (1 - a)]
+}
+
+function toHex(rgb: Rgb): string {
+  return `#${rgb.map((c) => Math.round(c).toString(16).padStart(2, '0')).join('')}`
+}
+
+/**
+ * The overlay floats over whatever is on screen, and its surfaces are translucent and lighter than
+ * the main window's: its text must stay readable on them over a black and over a white desktop.
+ */
+describe('overlay text contrast', () => {
+  const OVERLAY_CSS = readFileSync(
+    join(__dirname, '..', '..', '..', 'src/renderer/overlay/overlay.css'),
+    'utf8',
+  )
+
+  it('the overlay uses its own subtle colour for secondary text', () => {
+    expect(OVERLAY_CSS).toMatch(/html:root\s*\{\s*--text-subtle:\s*var\(--ov-subtle\);\s*\}/)
+  })
+
+  for (const theme of ['dark', 'light'] as const) {
+    const selector = `[data-theme='${theme}']`
+    const vars = tokens(selector)
+    const surfaces: Record<string, string> = {}
+    for (const [desk, rgb] of [
+      ['black', [0, 0, 0]],
+      ['white', [255, 255, 255]],
+    ] as const) {
+      const panel = over(rgba(selector, 'ov-panel'), [...rgb])
+      surfaces[`pill over ${desk}`] = toHex(over(rgba(selector, 'ov-pill'), [...rgb]))
+      surfaces[`panel over ${desk}`] = toHex(panel)
+      surfaces[`input over ${desk}`] = toHex(over(rgba(selector, 'ov-input'), panel))
+    }
+
+    for (const text of ['text', 'text-muted', 'ov-subtle'] as const) {
+      it(`${theme}: --${text} reaches WCAG AA (4.5:1) on the pill, panel and input`, () => {
+        for (const [surface, hex] of Object.entries(surfaces)) {
+          const ratio = contrast(vars[text]!, hex)
+          expect(ratio, `${text} on ${surface} = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5)
+        }
+      })
+    }
+
+    it(`${theme}: the overlay's subtle stays lighter-weight than muted`, () => {
+      const onPanel = (k: string) => contrast(vars[k]!, surfaces['panel over black']!)
+      expect(onPanel('text-muted')).toBeGreaterThan(onPanel('ov-subtle'))
+    })
+  }
+})

@@ -287,6 +287,9 @@ export const settings = {
     errInvalidArrows: 'Hold Ctrl, Alt or Win while pressing an arrow key.',
     errShiftOnly: '{keys} would block typing that character in other apps. Add Ctrl, Alt or Win.',
     errShiftOnlyArrows: 'Shift+arrows selects text in other apps. Add Ctrl, Alt or Win.',
+    // In-app binds only fire while Bluely is focused, so they only get in the way there.
+    errShiftOnlyLocal: '{keys} would block typing that character in Bluely. Add Ctrl, Alt or Win.',
+    errShiftOnlyArrowsLocal: 'Shift+arrows selects text in Bluely. Add Ctrl, Alt or Win.',
     errReserved: '{keys} is reserved by Windows or common editing. Pick another one.',
     errConflict: '{keys} is already used by “{other}”.',
     infoFocusOnly:

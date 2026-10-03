@@ -376,7 +376,9 @@ test.describe('PulseAudio loopback', () => {
     // The fixture is ~6.2 s of speech in two phrases with a ~350 ms pause between them, just
     // under the VAD's 400 ms redemption window. Depending on frame alignment the phrases
     // arrive as one ~6.4 s segment or as two ~3.2 s ones, so check that the speech was
-    // captured as whole phrases rather than where the VAD split it.
+    // captured as whole phrases rather than where the VAD split it: at most one segment per
+    // phrase (a VAD that chops phrases up fails here), and together nearly all of the speech.
+    expect(them.length).toBeLessThanOrEqual(2)
     expect(them.reduce((sum, s) => sum + s.durationMs, 0)).toBeGreaterThan(5000)
     expect(Math.max(...them.map((s) => s.durationMs))).toBeGreaterThan(2500)
     for (const s of them) {

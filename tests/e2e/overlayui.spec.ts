@@ -40,6 +40,17 @@ async function fake(app: ElectronApplication, channel: string, data: unknown): P
   )
 }
 
+/** Makes 'ai:run' fail the way main refuses a request (e.g. no API key stored). */
+async function failRun(code: string, message: string): Promise<void> {
+  await ctx.app.evaluate(
+    ({ ipcMain }, error) => {
+      ipcMain.removeHandler('ai:run')
+      ipcMain.handle('ai:run', () => ({ ok: false, error }))
+    },
+    { code, message },
+  )
+}
+
 async function calls(channel: string): Promise<unknown[]> {
   const all = await ctx.app.evaluate(
     () => (globalThis as unknown as { __calls?: Call[] }).__calls ?? [],
@@ -907,6 +918,22 @@ test('stop: Stop button calls session:stop and stopping stops capture', async ()
   await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
 })
 
+test('while the last call’s notes are written, the pill offers Start, not a disabled Stop', async () => {
+  await clearCalls()
+  await emit('session:state', liveState({ status: 'processing', startedAt: null }))
+  await expect(overlay.locator('[data-status="processing"]')).toBeVisible()
+  await expect(overlay.locator('[aria-live="polite"]', { hasText: 'Writing notes…' })).toHaveCount(
+    1,
+  )
+  await expect(overlay.getByRole('button', { name: 'Stop session' })).toHaveCount(0)
+  const start = overlay.getByRole('button', { name: 'Start Bluely' })
+  await expect(start).toBeEnabled()
+  await start.click()
+  await expect.poll(() => calls('session:start')).toEqual([{}])
+  await emit('session:state', liveState({ status: 'idle', sessionId: null, startedAt: null }))
+  await expect(overlay.locator('[data-status="processing"]')).toHaveCount(0)
+})
+
 test('deleting the meeting in History removes its transcript and answers from the overlay', async () => {
   // After the call the overlay still shows it (on purpose)…
   await emit('transcript:line', line('l-after', 'them', 40, 'Our budget is confidential.'))
@@ -963,6 +990,29 @@ test('short screens (1366×768 at 125%, and the smallest panel): the consent not
       overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
     ).toBeInViewport({ ratio: 1 })
     await shotBothThemes(`01c-short-screen-${availHeight}`)
+
+    // Assist without a key: main refuses, and the footer grows by the inline notice. The
+    // warnings give way to it (their rows scroll) rather than spilling under the footer, where
+    // the panel would cut a row in half; the consent note and the input stay wholly in view.
+    await failRun('no_key', 'No API key')
+    await overlay
+      .getByRole('toolbar', { name: 'Quick actions' })
+      .getByRole('button', { name: 'Assist' })
+      .click()
+    const notice = overlay.locator(
+      'section[aria-label="Bluely live panel"] > footer [role="alert"]',
+    )
+    await expect(notice).toBeVisible()
+    await expectConsentInView(box)
+    const squeezed = await panelLayout()
+    expect(squeezed.warningsBottom).toBeLessThanOrEqual(squeezed.footerTop + 0.5)
+    await expect(
+      overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
+    ).toBeInViewport({ ratio: 1 })
+    await notice.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(notice).toHaveCount(0)
+    await fake(ctx.app, 'ai:run', { id: 'run-1' })
+    await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
 
     // Once the note is dismissed, the warnings area shrinks back to its 40% cap.
     await box.getByRole('button', { name: 'Dismiss reminder' }).click()

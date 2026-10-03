@@ -111,6 +111,26 @@ describe('describeRebindOutcome', () => {
         ?.text,
     ).toBe('Use Ctrl, Alt or Win with a key (F-keys also work on their own).')
   })
+  it('says where Shift alone gets in the way: in-app binds only fire while Bluely is focused', () => {
+    expect(
+      describeRebindOutcome(
+        getKeybindDef('clearChat'),
+        evaluateRebind(map, 'clearChat', 'Shift+R'),
+      ),
+    ).toEqual({
+      tone: 'error',
+      text: 'Shift+R would block typing that character in Bluely. Add Ctrl, Alt or Win.',
+    })
+    expect(
+      describeRebindOutcome(
+        getKeybindDef('scrollChat'),
+        evaluateRebind(map, 'scrollChat', 'Shift'),
+      ),
+    ).toEqual({
+      tone: 'error',
+      text: 'Shift+arrows selects text in Bluely. Add Ctrl, Alt or Win.',
+    })
+  })
   it('labels binds through i18n', () => {
     expect(labelOf('toggleOverlay')).toBe('Show/hide Bluely')
   })

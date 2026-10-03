@@ -89,8 +89,8 @@ function SessionStatus({ capture }: { capture: CaptureLike }) {
 }
 
 /**
- * The always-visible pill: logo (toggles the panel), session status, Hide and Stop. The pill
- * body is the window's drag handle; its controls opt out of dragging.
+ * The always-visible pill: logo (toggles the panel), session status, Hide and Stop (Start when
+ * no call runs). The pill body is the window's drag handle; its controls opt out of dragging.
  */
 export function Pill({ capture }: { capture: CaptureLike }) {
   const status = useLive((s) => s.state.status)
@@ -98,6 +98,10 @@ export function Pill({ capture }: { capture: CaptureLike }) {
   const unseen = useUi((s) => s.unseen)
   const hideHidesWidget = useSettings((s) => s.settings.general.hideHidesWidget)
   const inSession = status !== 'idle'
+  // Stop while a call runs (a spinner while it is being stopped). Once it has ended and only its
+  // notes are being written ('processing'), the next call can already start, like from the main
+  // window and the tray: Start then, next to the "Writing notes…" status.
+  const showsStop = status === 'starting' || status === 'live' || status === 'stopping'
   const canStop = status === 'live' || status === 'starting'
   // "Hide" collapses the panel (or hides the widget, per settings); once collapsed it reads "Show".
   const showsExpand = !expanded && !hideHidesWidget
@@ -159,7 +163,7 @@ export function Pill({ capture }: { capture: CaptureLike }) {
         </button>
       </PillTip>
 
-      {inSession ? (
+      {showsStop ? (
         <PillTip content={t('overlay.pill.stop')}>
           <button
             type="button"
@@ -171,7 +175,7 @@ export function Pill({ capture }: { capture: CaptureLike }) {
               'w-8 bg-panel-3 text-fg hover:bg-danger hover:text-white disabled:hover:bg-panel-3 disabled:hover:text-fg',
             )}
           >
-            {status === 'stopping' || status === 'processing' ? (
+            {status === 'stopping' ? (
               <Spinner size={13} />
             ) : (
               <Square size={11} fill="currentColor" strokeWidth={0} />

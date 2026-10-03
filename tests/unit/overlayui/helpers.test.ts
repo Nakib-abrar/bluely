@@ -62,6 +62,28 @@ describe('matchLocalKey', () => {
       direction: 'down',
     })
   })
+
+  it('ignores binds main rejects (Shift only, reserved), so they never eat typing', () => {
+    const handEdited: KeybindMap = {
+      ...binds,
+      clearChat: 'Shift+R',
+      askAssist: 'Shift+Enter',
+      devPanel: 'Ctrl+C',
+      scrollChat: 'Shift',
+    }
+    expect(matchLocalKey(key('R', 'KeyR', { shift: true }), handEdited)).toBeNull()
+    expect(matchLocalKey(key('Enter', 'Enter', { shift: true }), handEdited)).toBeNull()
+    expect(matchLocalKey(key('c', 'KeyC', { ctrl: true }), handEdited)).toBeNull()
+    expect(matchLocalKey(key('ArrowUp', 'ArrowUp', { shift: true }), handEdited)).toBeNull()
+    // A reserved local bind does nothing either: Ctrl+C keeps copying.
+    expect(
+      matchLocalKey(key('c', 'KeyC', { ctrl: true }), { ...binds, clearChat: 'Ctrl+C' }),
+    ).toBeNull()
+    // Valid binds still work, including an F-key on its own.
+    expect(matchLocalKey(key('F9', 'F9'), { ...handEdited, devPanel: 'F9' })).toEqual({
+      type: 'devPanel',
+    })
+  })
 })
 
 describe('time helpers', () => {
