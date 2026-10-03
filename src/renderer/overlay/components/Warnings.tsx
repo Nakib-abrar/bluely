@@ -243,7 +243,8 @@ function ConsentReminder() {
  * Session warnings (no audio, mic problems, STT retrying, missing key, tips) and the consent
  * note. `panel` sits inside the expanded panel above the lists; `strip` is the compact card
  * under the pill while the panel is collapsed, so the consent reminder and problems are
- * never hidden just because the user collapsed the panel in an earlier call.
+ * never hidden just because the user collapsed the panel in an earlier call. In both, the
+ * consent note is pinned first and only the warning rows scroll.
  */
 export function Warnings({ variant = 'panel' }: { variant?: 'panel' | 'strip' }) {
   const status = useLive((s) => s.state.status)
@@ -279,44 +280,47 @@ export function Warnings({ variant = 'panel' }: { variant?: 'panel' | 'strip' })
     }
   }
 
-  const rows = (
-    <>
-      {visible.map((code) => {
-        const meta = META[code]
-        const Icon = meta.icon
-        return (
-          <Row
-            key={code}
-            code={code}
-            tone={meta.tone}
-            // The raw channel error (from the browser or the voice detector) is diagnostic
-            // detail, behind a translated label.
-            title={detailsTitle(failed[code]?.error)}
-            icon={Icon === 'spinner' ? <Spinner size={14} /> : <Icon size={14} />}
-            trailing={
-              <>
-                {meta.action ? <ActionButton action={meta.action} /> : null}
-                {meta.dismissible ? (
-                  <DismissButton
-                    label={t('overlay.warnings.dismiss')}
-                    onClick={() => dismiss(code as SessionWarningCode)}
-                  />
-                ) : null}
-              </>
-            }
-          >
-            {t(`overlay.warnings.${code}`)}
+  // Warning rows scroll inside their own area; the consent note sits above them, outside
+  // the scroll, so no number of warnings can push it (or its Copy button) out of view.
+  const rows =
+    visible.length || lastError ? (
+      <div data-warnings-rows className="flex min-h-0 flex-col gap-1.5 overflow-y-auto">
+        {visible.map((code) => {
+          const meta = META[code]
+          const Icon = meta.icon
+          return (
+            <Row
+              key={code}
+              code={code}
+              tone={meta.tone}
+              // The raw channel error (from the browser or the voice detector) is diagnostic
+              // detail, behind a translated label.
+              title={detailsTitle(failed[code]?.error)}
+              icon={Icon === 'spinner' ? <Spinner size={14} /> : <Icon size={14} />}
+              trailing={
+                <>
+                  {meta.action ? <ActionButton action={meta.action} /> : null}
+                  {meta.dismissible ? (
+                    <DismissButton
+                      label={t('overlay.warnings.dismiss')}
+                      onClick={() => dismiss(code as SessionWarningCode)}
+                    />
+                  ) : null}
+                </>
+              }
+            >
+              {t(`overlay.warnings.${code}`)}
+            </Row>
+          )
+        })}
+        {lastError && !visible.length ? (
+          <Row code="last_error" tone="error" icon={<TriangleAlert size={14} />}>
+            {lastError}
           </Row>
-        )
-      })}
-      {lastError && !visible.length ? (
-        <Row code="last_error" tone="error" icon={<TriangleAlert size={14} />}>
-          {lastError}
-        </Row>
-      ) : null}
-      {showConsent ? <ConsentReminder key={sessionId ?? 'none'} /> : null}
-    </>
-  )
+        ) : null}
+      </div>
+    ) : null
+  const consent = showConsent ? <ConsentReminder key={sessionId ?? 'none'} /> : null
 
   if (variant === 'strip') {
     return (
@@ -324,20 +328,26 @@ export function Warnings({ variant = 'panel' }: { variant?: 'panel' | 'strip' })
         data-hit
         data-warnings="strip"
         aria-label={t('overlay.warnings.label')}
-        className="ov-panel-in mt-2 flex max-h-[232px] w-full flex-col gap-1.5 overflow-y-auto rounded-2xl border border-ov-line bg-ov-panel p-2 shadow-panel"
+        className="ov-panel-in mt-2 flex max-h-[232px] w-full flex-col gap-1.5 rounded-2xl border border-ov-line bg-ov-panel p-2 shadow-panel"
       >
+        {consent}
         {rows}
       </section>
     )
   }
-  // Capped and scrollable: a pile of warnings must never squeeze the answers to nothing or
-  // spill over the input below.
+  // Capped: a pile of warnings must never squeeze the answers to nothing or spill over the
+  // input below. While the consent note shows, the area may take half the space (and at
+  // least enough for the note plus one warning row); otherwise 40%.
   return (
     <div
       data-warnings="panel"
       data-session={sessionId ?? ''}
-      className="flex max-h-[40%] shrink-0 flex-col gap-1.5 overflow-y-auto px-3 pt-1 pb-2"
+      className={cn(
+        'flex shrink-0 flex-col gap-1.5 px-3 pt-1 pb-2',
+        consent ? 'max-h-[max(50%,7.5rem)]' : 'max-h-[40%]',
+      )}
     >
+      {consent}
       {rows}
     </div>
   )

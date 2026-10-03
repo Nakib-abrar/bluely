@@ -5,7 +5,7 @@
  * IPC handlers from the main process (recording every call) and pushes the events main
  * would send. Set OVERLAYUI_SHOTS_DIR to also save screenshots of every state.
  */
-import { expect, test, type ElectronApplication, type Page } from '@playwright/test'
+import { expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { EventChannel, EventPayload } from '../../src/shared/ipc'
@@ -253,38 +253,60 @@ test('live session: timer, meters, warnings and consent reminder', async () => {
   await emit('session:state', liveState())
 })
 
-test('many warnings stay in a capped, scrollable area: answers and input keep their room', async () => {
+/** Every warning at once, most important first (as the overlay orders them). */
+const ALL_WARNINGS: LiveSessionState['warnings'] = [
+  'no_key',
+  'mic_denied',
+  'mic_not_found',
+  'loopback_unavailable',
+  'stt_error_retrying',
+  'no_system_audio',
+  'mic_muted',
+  'use_headphones',
+]
+
+/**
+ * The consent note and its Copy button are wholly in view: not clipped by a scroll area and
+ * not pushed below the fold by warnings (spec §0.5).
+ */
+async function expectConsentInView(scope: Locator): Promise<void> {
+  const note = scope.locator('[data-warning="consent"]')
+  await expect(note).toContainText('Let others know this call is being transcribed')
+  await expect(note).toBeInViewport({ ratio: 1 })
+  await expect(note.getByRole('button', { name: 'Copy disclosure message' })).toBeInViewport({
+    ratio: 1,
+  })
+}
+
+/** Geometry of the expanded panel: answer list, warnings area and footer. */
+function panelLayout() {
+  return overlay.evaluate(() => {
+    const rect = (sel: string) => document.querySelector(sel)?.getBoundingClientRect() ?? null
+    const rows = document.querySelector<HTMLElement>('[data-warnings="panel"] [data-warnings-rows]')
+    return {
+      list: rect('[data-list="insights"]')?.height ?? 0,
+      warningsBottom: rect('[data-warnings="panel"]')?.bottom ?? Number.POSITIVE_INFINITY,
+      footerTop: rect('section[aria-label="Bluely live panel"] > footer')?.top ?? 0,
+      rowsScrollable: rows ? rows.scrollHeight > rows.clientHeight : false,
+    }
+  })
+}
+
+test('many warnings stay in a capped, scrollable area: answers, input and the consent note keep their room', async () => {
+  // A new call, so the consent reminder (dismissed during the earlier one) shows again.
   await emit(
     'session:state',
-    liveState({
-      showConsentReminder: true,
-      warnings: [
-        'no_key',
-        'mic_denied',
-        'mic_not_found',
-        'loopback_unavailable',
-        'stt_error_retrying',
-        'no_system_audio',
-        'mic_muted',
-        'use_headphones',
-      ],
-    }),
+    liveState({ sessionId: 'sess-e2e-many', showConsentReminder: true, warnings: ALL_WARNINGS }),
   )
   const box = overlay.locator('[data-warnings="panel"]')
   await expect(box.locator('[data-warning="use_headphones"]')).toBeAttached()
-  const layout = await overlay.evaluate(() => {
-    const rect = (sel: string) => document.querySelector(sel)?.getBoundingClientRect() ?? null
-    const warnings = document.querySelector('[data-warnings="panel"]') as HTMLElement
-    return {
-      list: rect('[data-list="insights"]')?.height ?? 0,
-      warningsBottom: warnings.getBoundingClientRect().bottom,
-      footerTop: rect('section[aria-label="Bluely live panel"] > footer')?.top ?? 0,
-      scrollable: warnings.scrollHeight > warnings.clientHeight,
-    }
-  })
+  await expectConsentInView(box)
+  // The most important warning is in view too; the rest scroll.
+  await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+  const layout = await panelLayout()
   expect(layout.list).toBeGreaterThan(120)
   expect(layout.warningsBottom).toBeLessThanOrEqual(layout.footerTop + 0.5)
-  expect(layout.scrollable).toBe(true)
+  expect(layout.rowsScrollable).toBe(true)
   await expect(
     overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
   ).toBeInViewport()
@@ -294,6 +316,17 @@ test('many warnings stay in a capped, scrollable area: answers and input keep th
   await expect(box.locator('[data-warning="no_system_audio"]')).toHaveAttribute('role', 'status')
   await expect(box.locator('[data-warning="mic_muted"]')).toHaveAttribute('role', 'status')
   await shotBothThemes('01b-many-warnings')
+
+  // Collapsed, the strip under the pill keeps the note in view as well.
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  const strip = overlay.getByRole('region', { name: 'Session alerts' })
+  await overlay.getByRole('button', { name: 'Hide', exact: true }).click()
+  await expect(panel).toBeHidden()
+  await expect(strip.locator('[data-warning="use_headphones"]')).toBeAttached()
+  await expectConsentInView(strip)
+  await expect(strip.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+  await overlay.getByRole('button', { name: 'Show', exact: true }).click()
+  await expect(panel).toBeVisible()
   await emit('session:state', liveState())
 })
 
@@ -885,4 +918,53 @@ test('deleting the meeting in History removes its transcript and answers from th
   await expect(overlay.locator('[data-line-id]')).toHaveCount(0)
   await expect(overlay.getByText('Our budget is confidential.')).toHaveCount(0)
   await overlay.getByRole('tab', { name: /Insights/ }).click()
+})
+
+test('short screens (1366×768 at 125%, and the smallest panel): the consent note and the top warning stay in view', async () => {
+  const panel = overlay.getByRole('region', { name: 'Bluely live panel' })
+  const box = overlay.locator('[data-warnings="panel"]')
+  // Work-area heights → the panel height the overlay picks for them, and the room the answer
+  // list keeps while the consent note shows (the note and one full warning row come first).
+  const cases = [
+    { availHeight: 614, panelHeight: 366, minList: 60 },
+    { availHeight: 480, panelHeight: 320, minList: 16 },
+  ]
+  for (const { availHeight, panelHeight, minList } of cases) {
+    const fakeScreen = await overlay.addInitScript((h) => {
+      Object.defineProperty(Screen.prototype, 'availHeight', { configurable: true, get: () => h })
+    }, availHeight)
+    // A call starting on this screen: no key yet, the headphones tip and a flaky STT.
+    const state = liveState({
+      sessionId: `sess-e2e-short-${availHeight}`,
+      showConsentReminder: true,
+      warnings: ['no_key', 'stt_error_retrying', 'no_system_audio', 'use_headphones'],
+    })
+    await fake(ctx.app, 'session:getState', state)
+    await overlay.reload()
+    await overlay.waitForLoadState('domcontentloaded')
+    await emit('session:state', state)
+    await expect(panel).toBeVisible()
+    expect(await panel.evaluate((el) => (el as HTMLElement).offsetHeight)).toBe(panelHeight)
+
+    await expectConsentInView(box)
+    await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
+    const layout = await panelLayout()
+    expect(layout.list).toBeGreaterThanOrEqual(minList)
+    expect(layout.warningsBottom).toBeLessThanOrEqual(layout.footerTop + 0.5)
+    expect(layout.rowsScrollable).toBe(true)
+    await expect(
+      overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
+    ).toBeInViewport({ ratio: 1 })
+    await shotBothThemes(`01c-short-screen-${availHeight}`)
+
+    // Once the note is dismissed, the warnings area shrinks back to its 40% cap.
+    await box.getByRole('button', { name: 'Dismiss reminder' }).click()
+    await expect(box.locator('[data-warning="consent"]')).toHaveCount(0)
+    await expect.poll(async () => (await panelLayout()).list).toBeGreaterThanOrEqual(60)
+    await fakeScreen.dispose()
+  }
+  await fake(ctx.app, 'session:getState', liveState({ status: 'idle', sessionId: null }))
+  await overlay.reload()
+  await overlay.waitForLoadState('domcontentloaded')
+  await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
 })
