@@ -34,8 +34,14 @@
   /* Overlay surfaces (translucent, like a floating card) */
   --ov-pill: rgba(36, 36, 40, 0.94);
   --ov-panel: rgba(44, 44, 48, 0.96);
-  --ov-input: rgba(255, 255, 255, 0.05);
+  /* The ask input is a darker well in the panel (as in the light theme), so its placeholder
+     keeps its contrast. */
+  --ov-input: rgba(0, 0, 0, 0.12);
   --ov-border: rgba(255, 255, 255, 0.1);
+  /* The overlay's --text-subtle (overlay.css): its panels are lighter than the main window's
+     surfaces and let the desktop show through a little, so secondary text there is lighter.
+     ≥ 4.5:1 on the pill, panel and input over a black or a white desktop; checked by a unit test. */
+  --ov-subtle: #9d9da7;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.35);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
@@ -69,6 +75,7 @@
   --ov-panel: rgba(250, 250, 251, 0.97);
   --ov-input: rgba(0, 0, 0, 0.04);
   --ov-border: rgba(0, 0, 0, 0.1);
+  --ov-subtle: #68686f;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
 }

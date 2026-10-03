@@ -900,6 +900,22 @@ test('stop: Stop button calls session:stop and stopping stops capture', async ()
   await expect(overlay.getByRole('button', { name: 'Start Bluely' })).toBeVisible()
 })
 
+test('while the last call’s notes are written, the pill offers Start, not a disabled Stop', async () => {
+  await clearCalls()
+  await emit('session:state', liveState({ status: 'processing', startedAt: null }))
+  await expect(overlay.locator('[data-status="processing"]')).toBeVisible()
+  await expect(overlay.locator('[aria-live="polite"]', { hasText: 'Writing notes…' })).toHaveCount(
+    1,
+  )
+  await expect(overlay.getByRole('button', { name: 'Stop session' })).toHaveCount(0)
+  const start = overlay.getByRole('button', { name: 'Start Bluely' })
+  await expect(start).toBeEnabled()
+  await start.click()
+  await expect.poll(() => calls('session:start')).toEqual([{}])
+  await emit('session:state', liveState({ status: 'idle', sessionId: null, startedAt: null }))
+  await expect(overlay.locator('[data-status="processing"]')).toHaveCount(0)
+})
+
 test('deleting the meeting in History removes its transcript and answers from the overlay', async () => {
   // After the call the overlay still shows it (on purpose)…
   await emit('transcript:line', line('l-after', 'them', 40, 'Our budget is confidential.'))

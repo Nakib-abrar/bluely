@@ -36,12 +36,12 @@ export const home = {
     regenerating: 'Generating notes…',
     installLiveTitle: 'Stop the call and restart?',
     installLiveBody:
-      'Installing the update restarts Bluely, which stops the call that is in progress. You can generate notes for it later from the meeting page.',
+      'Installing the update restarts Bluely, which stops the call that is in progress. Bluely writes its notes first, then restarts.',
     installLiveConfirm: 'Stop call and restart',
-    installProcessingTitle: 'Restart while notes are being written?',
+    installProcessingTitle: 'Restart once the notes are written?',
     installProcessingBody:
-      'Notes for your last meeting are not finished yet. Restarting interrupts them; you can generate them again from the meeting page.',
-    installProcessingConfirm: 'Restart now',
+      'Notes for your last meeting are still being written. Bluely restarts to install the update as soon as they are done.',
+    installProcessingConfirm: 'Restart when done',
   },
   list: {
     loadMore: 'Load more',

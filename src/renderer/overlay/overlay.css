@@ -5,6 +5,12 @@ body.overlay-body {
   overflow: hidden;
 }
 
+/* Secondary text (labels, timestamps, the input placeholder, speed readouts) sits on the
+   overlay's lighter, translucent surfaces: use the overlay's subtle colour, per theme. */
+html:root {
+  --text-subtle: var(--ov-subtle);
+}
+
 /* Panel open / close: short fade + slide from under the pill. */
 @keyframes ov-panel-in {
   from {

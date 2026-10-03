@@ -1,29 +1,21 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { t } from '@shared/i18n'
-import type { LiveSessionState, Notice, NoticeAction } from '@shared/types'
+import type { Notice, NoticeAction } from '@shared/types'
 import { Banner, Button, ConfirmDialog } from '../../components/ui'
-import { errorMessage, invoke } from '../../lib/ipc'
+import { errorMessage, invoke, on } from '../../lib/ipc'
 import { useNotices } from '../hooks/useNotices'
+import { installUpdate, updateBlocker, type InstallDeps } from '../lib/installUpdate'
 import { useNav, type Nav } from '../router'
 import { toast } from '../stores/toast'
 
-type CallStatus = LiveSessionState['status']
-
-/** Session states in which "Restart to update" would end something the user cares about. */
-function updateBlocker(status: CallStatus): 'call' | 'notes' | null {
-  if (status === 'starting' || status === 'live' || status === 'stopping') return 'call'
-  if (status === 'processing') return 'notes'
-  return null
+const installDeps: InstallDeps = {
+  getStatus: () => invoke('session:getState').then((s) => s.status),
+  stop: () => invoke('session:stop'),
+  onStatus: (listener) => on('session:state', (s) => listener(s.status)),
+  install: () => invoke('updater:install'),
 }
 
-/** Installing quits Bluely: stop a running call first (main refuses to install during one). */
-async function installUpdate(): Promise<void> {
-  const { status } = await invoke('session:getState')
-  if (status === 'starting' || status === 'live') await invoke('session:stop')
-  await invoke('updater:install')
-}
-
-async function runAction(action: NoticeAction, nav: Nav): Promise<void> {
+async function runAction(action: NoticeAction, nav: Nav, signal: AbortSignal): Promise<void> {
   switch (action.type) {
     case 'openSettings':
       nav.openSettings(action.page)
@@ -36,7 +28,7 @@ async function runAction(action: NoticeAction, nav: Nav): Promise<void> {
       toast(t('home.notices.regenerating'))
       return
     case 'installUpdate':
-      await installUpdate()
+      await installUpdate(installDeps, signal)
       return
     case 'openExternal':
       await invoke('app:openExternal', { url: action.url })
@@ -48,18 +40,34 @@ function NoticeBanner({ notice, onDismiss }: { notice: Notice; onDismiss(): void
   const nav = useNav()
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<'call' | 'notes' | null>(null)
+  // The action in progress: "Restart & update" can wait for a call's notes, and Cancel ends that.
+  const running = useRef<AbortController | null>(null)
   const action = notice.action
 
   const run = (a: NoticeAction) => {
+    const ctrl = new AbortController()
+    running.current = ctrl
     setBusy(true)
-    runAction(a, nav)
-      .catch((err: unknown) =>
-        toast(`${t('home.notices.actionFailed')} ${errorMessage(err)}`, 'error'),
-      )
+    runAction(a, nav, ctrl.signal)
+      .catch((err: unknown) => {
+        if (!ctrl.signal.aborted) {
+          toast(`${t('home.notices.actionFailed')} ${errorMessage(err)}`, 'error')
+        }
+      })
       .finally(() => {
+        if (running.current !== ctrl) return
+        running.current = null
         setBusy(false)
         setConfirm(null)
       })
+  }
+
+  /** Closes the dialog; while waiting for the call to stop or its notes, don't restart after all. */
+  const cancel = () => {
+    running.current?.abort()
+    running.current = null
+    setBusy(false)
+    setConfirm(null)
   }
 
   const onAction = (a: NoticeAction) => {
@@ -102,7 +110,7 @@ function NoticeBanner({ notice, onDismiss }: { notice: Notice; onDismiss(): void
         <ConfirmDialog
           open={confirm !== null}
           onOpenChange={(open) => {
-            if (!open && !busy) setConfirm(null)
+            if (!open) cancel()
           }}
           title={
             confirm === 'notes'
@@ -119,9 +127,12 @@ function NoticeBanner({ notice, onDismiss }: { notice: Notice; onDismiss(): void
               ? t('home.notices.installProcessingConfirm')
               : t('home.notices.installLiveConfirm')
           }
-          danger
+          // Stopping the call is the drastic part; waiting for notes loses nothing.
+          danger={confirm !== 'notes'}
           busy={busy}
-          onConfirm={() => run(action.action)}
+          onConfirm={() => {
+            if (!busy) run(action.action)
+          }}
         />
       ) : null}
     </>

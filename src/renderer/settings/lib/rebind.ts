@@ -71,12 +71,23 @@ export function describeRebindOutcome(def: KeybindDef, outcome: RebindOutcome): 
   switch (outcome.kind) {
     case 'invalid':
       if (outcome.problem === 'shiftOnly') {
+        // A global bind would swallow the keys in every app; an in-app one only in Bluely.
+        const local = def.scope === 'local'
         return {
           tone: 'error',
           text:
             def.kind === 'single'
-              ? t('settings.keybinds.errShiftOnly', { keys: keysText(outcome.accelerator) })
-              : t('settings.keybinds.errShiftOnlyArrows'),
+              ? t(
+                  local ? 'settings.keybinds.errShiftOnlyLocal' : 'settings.keybinds.errShiftOnly',
+                  {
+                    keys: keysText(outcome.accelerator),
+                  },
+                )
+              : t(
+                  local
+                    ? 'settings.keybinds.errShiftOnlyArrowsLocal'
+                    : 'settings.keybinds.errShiftOnlyArrows',
+                ),
         }
       }
       return {

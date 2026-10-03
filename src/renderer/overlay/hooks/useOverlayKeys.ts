@@ -1,5 +1,10 @@
 import { useEffect } from 'react'
-import { keyEventToAccelerator, normalizeAccelerator, type KeybindMap } from '@shared/keybinds'
+import {
+  keyEventToAccelerator,
+  usableAccelerator,
+  type KeybindId,
+  type KeybindMap,
+} from '@shared/keybinds'
 import { invoke, on } from '../../lib/ipc'
 import { useSettings } from '../../stores/settings'
 import { assistShortcut, clearChat, runAction, selectTab, setExpanded } from '../actions'
@@ -14,16 +19,21 @@ export type LocalKeyAction =
 
 type KeyLike = Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>
 
-/** Maps a keydown to a local overlay keybind (pure; exported for tests). */
+/**
+ * Maps a keydown to a local overlay keybind (pure; exported for tests). Only binds main accepts
+ * count: a hand-edited Shift-only or reserved value (Settings shows "Invalid shortcut") does
+ * nothing here either, so it never eats typing in the Ask input.
+ */
 export function matchLocalKey(e: KeyLike, keybinds: KeybindMap): LocalKeyAction | null {
   const single = keyEventToAccelerator(e, 'single')
-  const is = (acc: string | null) => !!acc && !!single && normalizeAccelerator(acc) === single
-  if (is(keybinds.clearChat)) return { type: 'clearChat' }
-  if (is(keybinds.devPanel)) return { type: 'devPanel' }
-  if (is(keybinds.askAssist)) return { type: 'assist' }
-  if (keybinds.scrollChat && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+  const is = (id: KeybindId) => !!single && usableAccelerator(id, keybinds[id]) === single
+  if (is('clearChat')) return { type: 'clearChat' }
+  if (is('devPanel')) return { type: 'devPanel' }
+  if (is('askAssist')) return { type: 'assist' }
+  const scroll = usableAccelerator('scrollChat', keybinds.scrollChat)
+  if (scroll && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
     const prefix = keyEventToAccelerator(e, 'arrows2')
-    if (prefix && prefix === normalizeAccelerator(keybinds.scrollChat)) {
+    if (prefix && prefix === scroll) {
       return { type: 'scroll', direction: e.key === 'ArrowUp' ? 'up' : 'down' }
     }
   }
