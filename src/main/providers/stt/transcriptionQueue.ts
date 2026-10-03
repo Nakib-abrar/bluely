@@ -77,6 +77,11 @@ export interface TranscriptionQueueOptions {
    */
   maxOrderHoldMs?: number
   /**
+   * A request returned usable text (also after failed attempts). The result can still be held
+   * behind an earlier segment of its channel; onResult follows.
+   */
+  onReady?(job: TranscriptionJob): void
+  /**
    * Delivered in segment.startedAt order per channel, except that a result held longer than
    * maxOrderHoldMs behind a slow earlier request is delivered before it.
    */
@@ -415,6 +420,10 @@ export class TranscriptionQueue {
       ch.running--
       entry.state = 'ready'
       entry.readyAt = this.now()
+      if (this.opts.onReady) {
+        const onReady = this.opts.onReady
+        this.safe('onReady', () => onReady(job))
+      }
       this.afterRelease(ch)
       return
     }

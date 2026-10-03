@@ -321,6 +321,42 @@ describe('TranscriptionQueue retries', () => {
     expect(h.q.stats()).toMatchObject({ completed: 1, failed: 0, inFlight: 0 })
   })
 
+  it('reports a successful retry with onReady while its result is still held for ordering', async () => {
+    vi.useFakeTimers()
+    const ready: string[] = []
+    const h = harness({ onReady: (j) => ready.push(j.id) })
+    const slow = job('them', 100)
+    const retried = job('them', 200)
+    h.q.enqueue(slow)
+    h.q.enqueue(retried)
+    await flushMicrotasks()
+    h.stt.callFor(retried.segment.wav)!.d.reject(new ProviderError('server', { status: 502 }))
+    await flushMicrotasks()
+    expect(h.errors.map((e) => e.info.willRetry)).toEqual([true])
+    await vi.advanceTimersByTimeAsync(500)
+    h.stt.calls.at(-1)!.d.resolve(sttResult('Second sentence.'))
+    await flushMicrotasks()
+    // The retry worked (the UI can stop saying "retrying") though the line waits for `slow`.
+    expect(ready).toEqual([retried.id])
+    expect(h.results).toHaveLength(0)
+    h.stt.callFor(slow.segment.wav)!.d.resolve(sttResult('First sentence.'))
+    await flushMicrotasks()
+    expect(ready).toEqual([retried.id, slow.id])
+    expect(h.results.map((r) => r.job.id)).toEqual([slow.id, retried.id])
+  })
+
+  it('does not report onReady for text that is dropped', async () => {
+    const ready: string[] = []
+    const h = harness({ onReady: (j) => ready.push(j.id) })
+    const j = job('me', 100)
+    h.q.enqueue(j)
+    await flushMicrotasks()
+    h.stt.calls[0]!.d.resolve(sttResult('   '))
+    await flushMicrotasks()
+    expect(h.drops.map((d) => d.reason)).toEqual(['empty'])
+    expect(ready).toEqual([])
+  })
+
   it('gives up after maxRetries, reports willRetry:false and releases the ordering slot', async () => {
     vi.useFakeTimers()
     const h = harness()

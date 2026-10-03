@@ -48,6 +48,11 @@ class ControlledQueue {
     this.check()
   }
 
+  /** The request succeeded but its line is held behind an earlier segment (deliver() follows). */
+  ready(job: TranscriptionJob): void {
+    this.opts.onReady?.(job)
+  }
+
   fail(job: TranscriptionJob, err: ProviderError, willRetry: boolean): void {
     if (!willRetry) this.pending.delete(job.id)
     this.opts.onError?.(job, err, { willRetry, attempt: 1, retryInMs: willRetry ? 500 : null })
@@ -323,6 +328,49 @@ describe('SessionManager: auto-suggest around stop and echo (live F3, F4)', () =
     expect(h.autoRequests()).toHaveLength(0)
   })
 
+  it('my reply transcribed before their slower question line still cancels the auto-suggestion', async () => {
+    const h = setup()
+    const { sessionId, t0 } = await h.live()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(t0 + 20_000)
+    // Them: "How long does onboarding usually take?" is slow in speech-to-text…
+    const question = h.segment(sessionId, 'them', 1200, 1500)
+    // …and my short answer right after it comes back first (held as a possible echo).
+    const reply = h.segment(sessionId, 'me', 0, 900)
+    h.queue().deliver(reply, 'About two weeks')
+    h.queue().deliver(question, 'How long does onboarding usually take?')
+    await sleep(1000)
+    expect(h.autoRequests()).toHaveLength(0)
+  })
+
+  it('a reply outside the echo window, transcribed before the question, also cancels it', async () => {
+    const h = setup()
+    const { sessionId, t0 } = await h.live()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(t0 + 20_000)
+    // Their question ended 5 s ago and is still being transcribed (retries, a slow request)…
+    const question = h.segment(sessionId, 'them', 5000, 1500)
+    // …while my answer, well after it, is already back.
+    const reply = h.segment(sessionId, 'me', 0, 900)
+    h.queue().deliver(reply, 'About two weeks')
+    h.queue().deliver(question, 'How long does onboarding usually take?')
+    await sleep(1000)
+    expect(h.autoRequests()).toHaveLength(0)
+  })
+
+  it('my speech that ended before their question ended does not cancel it', async () => {
+    const h = setup()
+    const { sessionId, t0 } = await h.live()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(t0 + 20_000)
+    // I am finishing a sentence when they cut in with a question.
+    const mine = h.segment(sessionId, 'me', 1500, 1500)
+    const question = h.segment(sessionId, 'them', 0, 2000)
+    h.queue().deliver(mine, 'so that is roughly how the rollout works')
+    h.queue().deliver(question, 'Sorry, how many seats does that include?')
+    await vi.waitFor(() => expect(h.autoRequests()).toHaveLength(1), { timeout: 3000 })
+  })
+
   it('a deferred Me line that is not an echo cancels once their line has arrived', async () => {
     const h = setup()
     const { sessionId } = await h.live()
@@ -357,6 +405,19 @@ describe('SessionManager: key and error state (live F7, F10)', () => {
     h.queue().deliver(b, 'Thanks for topping up.')
     expect(h.lastState().lastError).toBeNull()
     expect(h.lastState().warnings).not.toContain('no_key')
+  })
+
+  it('clears "Transcription error (retrying)" when the retry succeeds, though its line is held', async () => {
+    const h = setup()
+    const { sessionId } = await h.live()
+    const a = h.segment(sessionId, 'them', 0)
+    h.queue().fail(a, new ProviderError('server'), true)
+    expect(h.lastState().warnings).toContain('stt_error_retrying')
+    // The retry worked; its line waits behind an earlier, slower segment of the channel.
+    h.queue().ready(a)
+    expect(h.lastState().warnings).not.toContain('stt_error_retrying')
+    h.queue().deliver(a, 'Yes, loud and clear.')
+    expect(h.lastState().warnings).not.toContain('stt_error_retrying')
   })
 
   it('keeps "Transcription error (retrying)" while any job retries and reports lost speech', async () => {

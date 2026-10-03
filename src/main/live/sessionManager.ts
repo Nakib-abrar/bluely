@@ -275,6 +275,7 @@ export class SessionManager implements LiveContextSource {
         }
       },
       concurrencyPerChannel: settings.advanced.sttConcurrency,
+      onReady: (job) => this.onSttReady(job),
       onResult: (job, result) => this.onTranscribed(job, result),
       onError: (job, err, info) => this.onSttError(job, err, info),
       onDropped: (job) => this.onSegmentGone(job),
@@ -632,7 +633,13 @@ export class SessionManager implements LiveContextSource {
     if (line.channel === 'them') {
       // Me lines that were waiting for this Them line first, as if they had arrived in order.
       this.resolveDeferredMe()
-      this.scheduler.onThemLine(line, { vadEndAt: job.vadEndAt })
+      if (this.scheduler.onThemLine(line, { vadEndAt: job.vadEndAt }) === 'pending') {
+        // A slower request can deliver their question after my reply to it. Had the lines
+        // arrived in the order they were spoken, that reply would have cancelled the
+        // suggestion, so it does now.
+        const reply = this.meLineEndedAfter(line)
+        if (reply) this.scheduler.onMeLine(reply)
+      }
     } else {
       this.onMeLineKept(line)
     }
@@ -652,6 +659,18 @@ export class SessionManager implements LiveContextSource {
     }
     this.deferredMe.set(line.id, { line, deadline: Date.now() + ECHO_WAIT_MAX_MS })
     this.armDeferredMeTimer()
+  }
+
+  /**
+   * A kept Me line that ended after `them` ended, i.e. I was still or again talking after they
+   * finished. Lines still waiting as a possible echo are not counted: they follow on release.
+   */
+  private meLineEndedAfter(them: TranscriptLine): TranscriptLine | null {
+    for (const line of this.buffer.finals()) {
+      if (line.channel === 'me' && line.endMs > them.endMs && !this.deferredMe.has(line.id))
+        return line
+    }
+    return null
   }
 
   /** True while Them speech within the echo window of `line` has not been transcribed yet. */
@@ -695,6 +714,15 @@ export class SessionManager implements LiveContextSource {
       },
       Math.max(0, next - Date.now()),
     )
+  }
+
+  /**
+   * A request succeeded (maybe on a retry). Its line can still wait behind a slower earlier
+   * segment of the channel, but the job is no longer retrying.
+   */
+  private onSttReady(job: TranscriptionJob): void {
+    if (!this.retrying.delete(job.id) || job.sessionId !== this.state.sessionId) return
+    this.syncRetryingWarning()
   }
 
   /** A segment that will produce no line (dropped, cancelled or failed for good). */
