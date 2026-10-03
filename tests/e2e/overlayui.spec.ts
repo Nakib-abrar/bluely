@@ -324,6 +324,8 @@ test('capture failures say why: denied mic, missing mic, or a generic failure wi
   )
   const micFailed = overlay.locator('[data-warning="mic_failed"]')
   await expect(micFailed).toContainText('Couldn’t start the microphone.')
+  // The raw (English) error is only a detail, behind a translated label.
+  await expect(micFailed).toHaveAttribute('title', 'Details: Voice detection failed to load')
   await expect(overlay.locator('[data-warning="system_audio_failed"]')).toContainText(
     'Couldn’t capture system audio.',
   )
@@ -355,6 +357,7 @@ test('capture failures say why: denied mic, missing mic, or a generic failure wi
     .toContainEqual(expect.objectContaining({ channel: 'me', state: 'starting' }))
   await emit('session:state', liveState())
   await expect(overlay.getByText(/^12:\d\d$/)).toBeVisible()
+  await expect(overlay.locator('[title="Listening · time in this session"]')).toBeVisible()
 })
 
 test('a microphone picked in Settings mid-call restarts only the Me channel', async () => {

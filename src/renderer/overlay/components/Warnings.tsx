@@ -104,6 +104,11 @@ function failedWithoutWarning(
   return !CHANNEL_WARNINGS[channel].some((code) => shown.includes(code))
 }
 
+/** Tooltip for a generic failure row: the channel's error text, if any, as details. */
+function detailsTitle(error: string | null | undefined): string | undefined {
+  return error ? t('overlay.warnings.details', { error }) : undefined
+}
+
 const toneClass: Record<Tone, string> = {
   info: 'border-accent/20 bg-accent-soft',
   warning: 'border-warning/25 bg-warning-soft',
@@ -284,8 +289,9 @@ export function Warnings({ variant = 'panel' }: { variant?: 'panel' | 'strip' })
             key={code}
             code={code}
             tone={meta.tone}
-            // The raw channel error is diagnostic detail (English, from the browser).
-            title={failed[code]?.error ?? undefined}
+            // The raw channel error (from the browser or the voice detector) is diagnostic
+            // detail, behind a translated label.
+            title={detailsTitle(failed[code]?.error)}
             icon={Icon === 'spinner' ? <Spinner size={14} /> : <Icon size={14} />}
             trailing={
               <>

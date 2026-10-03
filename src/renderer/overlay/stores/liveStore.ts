@@ -15,11 +15,13 @@ import { nextFrame, type FrameScheduler } from '../lib/frame'
 export const MAX_TRACES = 10
 
 /**
- * Warnings main sets on every failure and clears on the next success. Once shown they stay
- * up at least this long, so intermittent errors don't make the panel jump (and screen
- * readers re-announce the row) every few seconds.
+ * Warnings main sets on every failure and clears on the next success. After main clears one
+ * the overlay keeps it up this much longer, counted from the latest clear, and a new failure
+ * inside that window simply keeps it up. Intermittent errors then show as one steady row
+ * instead of mounting and unmounting (the panel jumping and screen readers re-announcing the
+ * row) every few seconds; the row goes away once that long has passed without a failure.
  */
-export const WARNING_MIN_VISIBLE_MS: Partial<Record<SessionWarningCode, number>> = {
+export const WARNING_HOLD_MS: Partial<Record<SessionWarningCode, number>> = {
   stt_error_retrying: 5000,
 }
 
@@ -45,7 +47,7 @@ export interface LiveStore {
   cards: AiCard[]
   /** Newest last, at most MAX_TRACES. */
   traces: LatencyTrace[]
-  /** Warnings to show: main's active ones plus flapping ones inside their minimum time. */
+  /** Warnings to show: main's active ones plus held ones cleared less than their hold ago. */
   shownWarnings: SessionWarningCode[]
 
   setState(state: LiveSessionState): void
@@ -108,8 +110,11 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
   /** Streamed text not yet applied to the cards, by card id. */
   const pending = new Map<string, string>()
   let scheduled = false
-  /** When each held warning (WARNING_MIN_VISIBLE_MS) became visible. */
-  const shownSince = new Map<SessionWarningCode, number>()
+  /**
+   * Warnings with a hold (WARNING_HOLD_MS) that are on screen: null while main has the
+   * warning active, otherwise when main last cleared it.
+   */
+  const heldClearedAt = new Map<SessionWarningCode, number | null>()
   let holdTimer: ReturnType<typeof setTimeout> | null = null
 
   return create<LiveStore>((set, get) => {
@@ -121,22 +126,28 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
       const shown = [...active]
       const now = Date.now()
       let wakeIn = Number.POSITIVE_INFINITY
-      for (const [code, minMs] of Object.entries(WARNING_MIN_VISIBLE_MS) as [
+      for (const [code, holdMs] of Object.entries(WARNING_HOLD_MS) as [
         SessionWarningCode,
         number,
       ][]) {
         if (active.includes(code)) {
-          if (!shownSince.has(code)) shownSince.set(code, now)
+          // (Re)raised: on screen for as long as main keeps it, plus the hold after that.
+          heldClearedAt.set(code, null)
           continue
         }
-        const since = shownSince.get(code)
-        if (since == null) continue
-        const left = since + minMs - now
+        if (!heldClearedAt.has(code)) continue
+        let clearedAt = heldClearedAt.get(code) ?? null
+        if (clearedAt == null) {
+          // Main just cleared it: the hold starts now, however long it had been up.
+          clearedAt = now
+          heldClearedAt.set(code, now)
+        }
+        const left = clearedAt + holdMs - now
         if (left > 0) {
           shown.push(code)
           wakeIn = Math.min(wakeIn, left)
         } else {
-          shownSince.delete(code)
+          heldClearedAt.delete(code)
         }
       }
       if (wakeIn !== Number.POSITIVE_INFINITY) holdTimer = setTimeout(refreshWarnings, wakeIn)
@@ -146,7 +157,7 @@ export function createLiveStore(schedule: FrameScheduler = nextFrame) {
     const adopt = (sessionId: string) => {
       if (get().sessionId === sessionId) return
       pending.clear()
-      shownSince.clear()
+      heldClearedAt.clear()
       set({ sessionId, lines: [], cards: [] })
     }
     /** Live cards belong to the current session (or to none when main does not say). */

@@ -55,7 +55,7 @@ function SessionStatus({ capture }: { capture: CaptureLike }) {
       </span>
       <span
         className="flex items-center gap-1.5"
-        title={live ? `${label} · ${t('overlay.pill.elapsed')}` : (label ?? undefined)}
+        title={live ? t('overlay.pill.listeningElapsed') : (label ?? undefined)}
       >
         <span
           aria-hidden
@@ -106,7 +106,7 @@ export function Pill({ capture }: { capture: CaptureLike }) {
   const logoLabel = expanded
     ? t('overlay.pill.hidePanel')
     : badge
-      ? `${t('overlay.pill.showPanel')} · ${t('overlay.panel.newAnswers', { count: badge })}`
+      ? t('overlay.pill.showPanelWithNew', { count: badge })
       : t('overlay.pill.showPanel')
 
   return (

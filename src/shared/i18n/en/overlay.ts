@@ -2,6 +2,7 @@
 export const overlay = {
   pill: {
     showPanel: 'Show panel',
+    showPanelWithNew: 'Show panel · {count} new',
     hidePanel: 'Hide panel',
     hide: 'Hide',
     show: 'Show',
@@ -15,7 +16,7 @@ export const overlay = {
     processing: 'Writing notes…',
     listening: 'Listening',
     noAudio: 'No audio',
-    elapsed: 'Time in this session',
+    listeningElapsed: 'Listening · time in this session',
     activity: 'Audio activity: Me (microphone) and Them (system audio)',
     channelListening: '{who}: listening',
     channelStarting: '{who}: starting…',
@@ -90,6 +91,7 @@ export const overlay = {
     openSettings: 'Settings',
     retry: 'Retry',
     dismiss: 'Dismiss',
+    details: 'Details: {error}',
   },
   consent: {
     title: 'Let others know this call is being transcribed',

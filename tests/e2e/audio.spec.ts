@@ -373,7 +373,12 @@ test.describe('PulseAudio loopback', () => {
     expect(result.statuses).toContainEqual({ channel: 'them', state: 'listening', error: null })
     const them = result.allSegments.filter((s) => s.channel === 'them')
     expect(them.length).toBeGreaterThanOrEqual(1)
-    expect(Math.max(...them.map((s) => s.durationMs))).toBeGreaterThan(4000)
+    // The fixture is ~6.2 s of speech in two phrases with a ~350 ms pause between them, just
+    // under the VAD's 400 ms redemption window. Depending on frame alignment the phrases
+    // arrive as one ~6.4 s segment or as two ~3.2 s ones, so check that the speech was
+    // captured as whole phrases rather than where the VAD split it.
+    expect(them.reduce((sum, s) => sum + s.durationMs, 0)).toBeGreaterThan(5000)
+    expect(Math.max(...them.map((s) => s.durationMs))).toBeGreaterThan(2500)
     for (const s of them) {
       expect(s.wavValid).toBe(true)
       expect(s.durationMs).toBeLessThanOrEqual(12_000)
