@@ -74,6 +74,7 @@ describe('formatAppInfo', () => {
       arch: 'x64',
       isPackaged: true,
       isPortable: true,
+      canLaunchAtStartup: true,
       dataDir: 'C:\\x',
       devMode: false,
     }

@@ -28,7 +28,8 @@ export function loopbackAudioOption(): LoopbackAudio {
 
 /**
  * Whether "Launch at startup" can be turned on in this build: Windows (installed, or portable
- * started through its launcher) and macOS. Settings can hide or disable the toggle when false.
+ * started through its launcher) and macOS. app:getInfo passes it to Settings › General, which
+ * disables the toggle with an explanation when false.
  */
 export function canLaunchAtStartup(): boolean {
   if (process.platform === 'win32') return win32.canLaunchAtStartup()
@@ -54,18 +55,20 @@ export function setLaunchAtStartup(enabled: boolean): void {
  * The entry lives outside Bluely's data and drifts from the setting: the uninstaller deletes it
  * while the setting in %APPDATA%\Bluely survives a reinstall; reinstalling into another folder
  * (or switching between "only for me" and "all users") runs the old uninstaller as an update,
- * which keeps an entry pointing at the deleted exe; a portable exe can be moved. Skipped in
- * unpackaged (dev/test) runs, which would otherwise rewrite or delete the installed app's
- * entry (same value name).
+ * which keeps an entry pointing at the deleted exe; a portable exe can be moved. On Windows an
+ * entry that belongs to another copy of Bluely that still exists is left alone (see
+ * win32.syncLaunchAtStartup). Skipped in unpackaged (dev/test) runs, which would otherwise
+ * rewrite or delete the installed app's entry (same value name). `wanted` reads the setting.
  */
-export function syncLaunchAtStartup(wanted: boolean): void {
+export async function syncLaunchAtStartup(wanted: () => boolean): Promise<void> {
   if (!app.isPackaged) return
   if (process.platform === 'win32') {
-    win32.syncLaunchAtStartup(wanted)
+    await win32.syncLaunchAtStartup(wanted)
     return
   }
-  if (process.platform === 'darwin' && app.getLoginItemSettings().openAtLogin !== wanted) {
-    app.setLoginItemSettings({ openAtLogin: wanted })
+  const want = wanted()
+  if (process.platform === 'darwin' && app.getLoginItemSettings().openAtLogin !== want) {
+    app.setLoginItemSettings({ openAtLogin: want })
   }
 }
 

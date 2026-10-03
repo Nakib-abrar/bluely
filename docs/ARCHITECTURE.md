@@ -203,10 +203,18 @@ sessions used. Never run a plain `VACUUM` (it can renumber rowids); use
   The entry lives outside `%APPDATA%\Bluely` and can drift from the setting (the uninstaller
   removes it but a reinstall keeps the setting; a reinstall into another folder keeps an entry
   for the old exe; a portable exe can be moved), so every start of a packaged build calls
-  `syncLaunchAtStartup()` from the core handlers: it rewrites the entry when it does not already
-  start this exe with `--hidden` (a matching entry is left alone, so a Task Manager "Disabled"
-  stays), and deletes it when the setting is off. Unpackaged runs (`pnpm dev`, E2E against
-  `out/`) skip this.
+  `syncLaunchAtStartup()` from the core handlers (asynchronously; it re-reads the setting after
+  any wait, so it never undoes a toggle made meanwhile). All copies (per-user, all users,
+  portable, `release\win-unpacked`) share `%APPDATA%\Bluely` and the value name, so each write
+  records the exe in `%APPDATA%\Bluely\launch-at-startup.json`. The sync leaves an entry that
+  already starts this exe with `--hidden` alone (so a Task Manager "Disabled" stays) and deletes
+  it when the setting is off; leaves an entry for the recorded exe of another copy alone while
+  that exe exists, whatever this copy's setting; repoints an entry whose recorded exe is gone
+  (keeping "Disabled") or deletes it when the setting is off; writes a missing entry when the
+  setting is on; and repoints an unrecorded entry (from before the record) only when the setting
+  is on. Unpackaged runs (`pnpm dev`, E2E against `out/`) skip this. `app:getInfo` reports
+  `canLaunchAtStartup`; Settings › General disables the toggle, with an explanation, when it is
+  false (non-Windows dev runs, a portable build without its launcher path).
 - **Releases**: `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`:
   typecheck, lint, unit tests, build, then `electron-builder --publish never` and
   `SHA256SUMS.txt` (also printed in the job summary). The publish step uploads with `gh`: a new

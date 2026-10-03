@@ -38,6 +38,8 @@ export const settings = {
     modeDescription: 'Instructions and files Bluely uses on your next call',
     startupTitle: 'Launch at startup',
     startupDescription: 'Start Bluely in the tray when you sign in to Windows',
+    startupUnavailable:
+      'Not available in this copy of Bluely. Use the installed app or start the portable .exe.',
     consentTitle: 'Consent reminder',
     consentDescription: 'Remind me to tell people on the call that I use an AI note-taker',
     autoSuggestTitle: 'Auto-suggest',
