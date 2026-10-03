@@ -40,6 +40,17 @@ async function fake(app: ElectronApplication, channel: string, data: unknown): P
   )
 }
 
+/** Makes 'ai:run' fail the way main refuses a request (e.g. no API key stored). */
+async function failRun(code: string, message: string): Promise<void> {
+  await ctx.app.evaluate(
+    ({ ipcMain }, error) => {
+      ipcMain.removeHandler('ai:run')
+      ipcMain.handle('ai:run', () => ({ ok: false, error }))
+    },
+    { code, message },
+  )
+}
+
 async function calls(channel: string): Promise<unknown[]> {
   const all = await ctx.app.evaluate(
     () => (globalThis as unknown as { __calls?: Call[] }).__calls ?? [],
@@ -979,6 +990,29 @@ test('short screens (1366×768 at 125%, and the smallest panel): the consent not
       overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
     ).toBeInViewport({ ratio: 1 })
     await shotBothThemes(`01c-short-screen-${availHeight}`)
+
+    // Assist without a key: main refuses, and the footer grows by the inline notice. The
+    // warnings give way to it (their rows scroll) rather than spilling under the footer, where
+    // the panel would cut a row in half; the consent note and the input stay wholly in view.
+    await failRun('no_key', 'No API key')
+    await overlay
+      .getByRole('toolbar', { name: 'Quick actions' })
+      .getByRole('button', { name: 'Assist' })
+      .click()
+    const notice = overlay.locator(
+      'section[aria-label="Bluely live panel"] > footer [role="alert"]',
+    )
+    await expect(notice).toBeVisible()
+    await expectConsentInView(box)
+    const squeezed = await panelLayout()
+    expect(squeezed.warningsBottom).toBeLessThanOrEqual(squeezed.footerTop + 0.5)
+    await expect(
+      overlay.getByRole('textbox', { name: 'Ask about your screen or conversation' }),
+    ).toBeInViewport({ ratio: 1 })
+    await notice.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(notice).toHaveCount(0)
+    await fake(ctx.app, 'ai:run', { id: 'run-1' })
+    await expect(box.locator('[data-warning="no_key"]')).toBeInViewport({ ratio: 1 })
 
     // Once the note is dismissed, the warnings area shrinks back to its 40% cap.
     await box.getByRole('button', { name: 'Dismiss reminder' }).click()

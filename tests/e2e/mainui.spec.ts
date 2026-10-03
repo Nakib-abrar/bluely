@@ -765,7 +765,9 @@ test('notice dismiss calls app:dismissNotice', async () => {
   // …without bringing back the notice that was dismissed, not even for a moment.
   await expect(page.getByText('Bluely 0.2.0 is ready to install')).toHaveCount(0)
   expect(
-    await page.evaluate(() => (window as unknown as { __noticeCameBack?: boolean }).__noticeCameBack),
+    await page.evaluate(
+      () => (window as unknown as { __noticeCameBack?: boolean }).__noticeCameBack,
+    ),
   ).toBe(false)
   expect((await calls(ctx.app, 'app:dismissNotice')).at(-1)?.req).toEqual({ id: 'update-0.2.0' })
   // Dismiss the model notice too, so the pages below look as before.

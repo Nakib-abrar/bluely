@@ -337,13 +337,15 @@ export function Warnings({ variant = 'panel' }: { variant?: 'panel' | 'strip' })
   }
   // Capped: a pile of warnings must never squeeze the answers to nothing or spill over the
   // input below. While the consent note shows, the area may take half the space (and at
-  // least enough for the note plus one warning row); otherwise 40%.
+  // least enough for the note plus one warning row); otherwise 40%. When even that does not fit
+  // (the smallest panel with an inline notice in the footer), the area gives way instead of
+  // spilling under the footer: its rows shrink and scroll, the note itself never shrinks.
   return (
     <div
       data-warnings="panel"
       data-session={sessionId ?? ''}
       className={cn(
-        'flex shrink-0 flex-col gap-1.5 px-3 pt-1 pb-2',
+        'flex min-h-0 shrink flex-col gap-1.5 px-3 pt-1 pb-2',
         consent ? 'max-h-[max(50%,7.5rem)]' : 'max-h-[40%]',
       )}
     >
